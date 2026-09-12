@@ -444,3 +444,80 @@ async fn probe_the_largest_batch_that_fits() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn a_proxy_cannot_open_a_name_even_when_registrar_signs_the_call() -> Result<()> {
+    let fleet = setup_live_multisig().await?;
+    upgrade_in_place(&fleet).await?;
+
+    let proxy_sk = SecretKey::from_seed(KeyType::ED25519, "proxy");
+    let proxy_id: near_workspaces::AccountId = "proxy.test.near".parse()?;
+    fleet
+        .worker
+        .patch(&proxy_id)
+        .code(&ours_wasm()?)
+        .access_key(
+            proxy_sk.public_key(),
+            near_workspaces::AccessKey::full_access(),
+        )
+        .account(
+            near_workspaces::AccountDetailsPatch::default().balance(NearToken::from_near(100_000)),
+        )
+        .transact()
+        .await?;
+    let proxy = Contract::from_secret_key(proxy_id.clone(), proxy_sk, &fleet.worker);
+    proxy
+        .call("new")
+        .args_json(json!({
+            "members": [
+                { "account_id": fleet.alice.id() },
+                { "account_id": fleet.bob.id() },
+            ],
+            "num_confirmations": 2,
+        }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    proxy
+        .call("grant_names")
+        .args_json(json!({
+            "grantee": fleet.registrar.id(),
+            "names": ["viaproxy"],
+            "owner_key": fleet.owner_key,
+            "funding": FUNDING,
+            "expires_at_ns": FAR_FUTURE_NS.to_string(),
+        }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let outcome = fleet
+        .registrar
+        .as_account()
+        .call(&proxy_id, "open_names")
+        .args_json(json!({ "names": ["viaproxy"] }))
+        .max_gas()
+        .transact()
+        .await?;
+
+    let created = fleet
+        .worker
+        .view_account(&"viaproxy".parse()?)
+        .await
+        .is_ok();
+    assert!(
+        !created,
+        "a top level account was created with the proxy as predecessor, so the runtime \
+         is not checking predecessor_id and the opener does not need to live on registrar"
+    );
+    let failures = format!("{:#?}", outcome.receipt_failures());
+    assert!(
+        failures.contains("CreateAccountOnlyByRegistrar") || failures.contains("can't be created"),
+        "expected the registrar check to reject the proxy, got {}",
+        failures
+    );
+    Ok(())
+}
