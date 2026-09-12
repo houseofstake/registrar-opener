@@ -169,6 +169,20 @@ Lint is two passes, because the sandbox dev dependencies cannot build for wasm:
     cargo clippy --lib --target wasm32-unknown-unknown -- -D warnings
     cargo clippy --tests -- -D warnings
 
+For the bytes that would actually be deployed, build them reproducibly:
+
+    cargo near build reproducible-wasm --no-abi
+
+That runs inside `sourcescan/cargo-near:0.22.0-rust-1.97.1` pinned by digest in `Cargo.toml`, and
+builds the git commit rather than the working tree, so it needs a clean worktree and the HEAD
+commit pushed. Two people running it at the same commit get the same sha256, which is what makes
+it possible for a council to vote on a hash rather than on trust. The hash for a given commit is
+recorded in that commit's annotated tag, not in a file, because cargo-near stamps the commit into
+the wasm and committing the hash would change it.
+
+A plain `cargo build` produces a wasm the nearcore VM rejects. Use cargo-near for anything that
+will be deployed.
+
 ## Fixtures
 
 `fixtures/registrar-mainnet.wasm` is the code deployed at `registrar` today. Verify it:
@@ -216,11 +230,22 @@ policy is five members with a majority threshold, which is three votes, matching
 
 ## tests/testnet.rs
 
-The same install rehearsal against live testnet, ignored by default. It needs credentials in
-`~/.near-credentials/testnet` and two funded accounts named by `REHEARSAL_HOST` and
-`REHEARSAL_MEMBER`. It deploys the real mainnet multisig onto the host account, brings it up as a
-2 of 2, and then installs this contract through a multisig request, which is the sequence that
-would be run on mainnet.
+The same install rehearsal against live testnet, ignored by default because it spends faucet
+funds:
+
+    cargo test --test testnet -- --ignored --nocapture
+
+It needs no credentials and touches no existing account. It creates its own accounts from the
+faucet, deploys the real mainnet multisig onto one of them, brings it up as a 2 of 2, and then
+installs this contract through a multisig request, which is the sequence that would be run on
+mainnet.
+
+Run twice on 2026-09-12, both clean. The second landed on
+`dev-20260912183400-31014144628914.testnet`. Verified independently over RPC rather than from the
+test's own assertions: `code_hash` came back
+`8DDxNfEw7KiN8gpVazUgYNCrRMqsL33GRbJv9YpbF9ta`, matching the build exactly, `opener_view`
+answered with the right admin, operator and a `mainnet_upgrade_delay_ns` of 172800000000000, and
+`get_members` returned `MethodResolveError(MethodNotFound)`.
 
 ## What is not proven
 
@@ -237,4 +262,4 @@ keys nobody here holds:
   mainnet's own four keys. The set's other four entries, the threshold and the nonce are
   untouched, so the only substitution is which keys sign.
 
-Nothing here has run on mainnet.
+The install sequence has run on live testnet twice. Nothing here has run on mainnet.

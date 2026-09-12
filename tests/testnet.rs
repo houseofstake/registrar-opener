@@ -1,33 +1,12 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use base64::Engine;
 use near_workspaces::network::Testnet;
-use near_workspaces::types::{Gas, NearToken, SecretKey};
-use near_workspaces::{Account, AccountId, Contract, Worker};
+use near_workspaces::types::{Gas, NearToken};
+use near_workspaces::{Contract, Worker};
 use serde_json::json;
 
 const RPC: &str = "https://test.rpc.fastnear.com";
-const HOST_ENV: &str = "REHEARSAL_HOST";
-const MEMBER_ENV: &str = "REHEARSAL_MEMBER";
 const REHEARSAL_DELAY_NS: u64 = 2_000_000_000;
-
-fn keystore_secret(account: &str) -> Result<SecretKey> {
-    let path = PathBuf::from(std::env::var("HOME")?)
-        .join(".near-credentials/testnet")
-        .join(format!("{account}.json"));
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("no testnet credentials for {account}"))?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw)?;
-    let key = parsed["private_key"]
-        .as_str()
-        .context("credential file has no private_key")?;
-    key.parse().context("credential private_key does not parse")
-}
-
-fn named(variable: &str) -> Result<String> {
-    std::env::var(variable).with_context(|| format!("{variable} is not set"))
-}
 
 fn fixture(name: &str) -> Result<Vec<u8>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -49,42 +28,41 @@ fn ours_wasm() -> Result<Vec<u8>> {
     let path = std::path::PathBuf::from(dir)
         .join("near")
         .join("registrar_opener.wasm");
-    std::fs::read(&path).with_context(|| format!("{} is missing", path.display()))
+    std::fs::read(&path).with_context(|| {
+        format!(
+            "{} is missing, run cargo near build non-reproducible-wasm --locked --no-abi",
+            path.display()
+        )
+    })
 }
 
 async fn connect() -> Result<Worker<Testnet>> {
     Ok(near_workspaces::testnet().rpc_addr(RPC).await?)
 }
 
-async fn account(worker: &Worker<Testnet>, id: &str) -> Result<Account> {
-    let parsed: AccountId = id.parse()?;
-    Ok(Account::from_secret_key(
-        parsed,
-        keystore_secret(id)?,
-        worker,
-    ))
-}
-
 #[tokio::test]
-#[ignore = "runs against live testnet, needs credentials and two funded accounts"]
+#[ignore = "runs against live testnet and spends faucet funds"]
 async fn the_multisig_installs_the_opener_over_itself_on_live_testnet() -> Result<()> {
     let worker = connect().await?;
-    let host_id = named(HOST_ENV)?;
-    let member_id = named(MEMBER_ENV)?;
-    let host = account(&worker, &host_id).await?;
-    let member = account(&worker, &member_id).await?;
 
-    let host_contract =
-        Contract::from_secret_key(host.id().clone(), keystore_secret(&host_id)?, &worker);
-    host_contract
-        .as_account()
+    let host_account = worker.dev_create_account().await?;
+    let host = Contract::from_secret_key(
+        host_account.id().clone(),
+        host_account.secret_key().clone(),
+        &worker,
+    );
+
+    let alice = worker.dev_create_account().await?;
+    let bob = worker.dev_create_account().await?;
+    println!("rehearsal host {}", host.id());
+
+    host.as_account()
         .deploy(&fixture("registrar-mainnet.wasm")?)
         .await?
         .into_result()?;
-    host_contract
-        .call("new")
+    host.call("new")
         .args_json(json!({
-            "members": [{ "account_id": host.id() }, { "account_id": member.id() }],
+            "members": [{ "account_id": alice.id() }, { "account_id": bob.id() }],
             "num_confirmations": 2,
         }))
         .max_gas()
@@ -92,21 +70,29 @@ async fn the_multisig_installs_the_opener_over_itself_on_live_testnet() -> Resul
         .await?
         .into_result()?;
 
+    let members: Vec<serde_json::Value> = host.view("get_members").await?.json()?;
+    assert_eq!(members.len(), 2, "the multisig did not come up on testnet");
+    let threshold: u32 = host.view("get_num_confirmations").await?.json()?;
+    assert_eq!(threshold, 2);
+
+    let council = worker.dev_create_account().await?;
+    let operator = worker.dev_create_account().await?;
+    let code = ours_wasm()?;
     let init = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&json!({
-        "admin": member.id(),
-        "operator": host.id(),
+        "admin": council.id(),
+        "operator": operator.id(),
         "upgrade_delay_ns": REHEARSAL_DELAY_NS.to_string(),
     }))?);
 
-    let request_id: u32 = host
-        .call(host_contract.id(), "add_request")
+    let request_id: u32 = alice
+        .call(host.id(), "add_request_and_confirm")
         .args_json(json!({
             "request": {
-                "receiver_id": host_contract.id(),
+                "receiver_id": host.id(),
                 "actions": [
                     {
                         "type": "DeployContract",
-                        "code": base64::engine::general_purpose::STANDARD.encode(ours_wasm()?),
+                        "code": base64::engine::general_purpose::STANDARD.encode(&code),
                     },
                     {
                         "type": "FunctionCall",
@@ -123,19 +109,35 @@ async fn the_multisig_installs_the_opener_over_itself_on_live_testnet() -> Resul
         .await?
         .json()?;
 
-    member
-        .call(host_contract.id(), "confirm")
+    let confirm = bob
+        .call(host.id(), "confirm")
         .args_json(json!({ "request_id": request_id }))
         .max_gas()
         .transact()
-        .await?
-        .into_result()?;
+        .await?;
+    assert!(confirm.is_success(), "confirm failed: {confirm:#?}");
 
-    let view: serde_json::Value = host_contract.view("opener_view").await?.json()?;
-    assert_eq!(view["admin"], member.id().as_str());
-    assert_eq!(view["operator"], host.id().as_str());
+    let view: serde_json::Value = host.view("opener_view").await?.json()?;
+    assert_eq!(view["admin"], council.id().as_str());
+    assert_eq!(view["operator"], operator.id().as_str());
     assert_eq!(view["state_version"], 1);
-    let balance = worker.view_account(host_contract.id()).await?.balance;
-    assert!(balance > NearToken::from_near(1), "host ran dry: {balance}");
+    assert!(
+        host.view("get_members").await.is_err(),
+        "the multisig methods survived the replacement"
+    );
+
+    let details = worker.view_account(host.id()).await?;
+    let floor = NearToken::from_yoctonear(details.storage_usage as u128 * 10u128.pow(19));
+    assert!(
+        details.balance > floor,
+        "host is below its storage floor: {} vs {floor}",
+        details.balance
+    );
+    println!(
+        "installed on {} at {} bytes, balance {}",
+        host.id(),
+        details.storage_usage,
+        details.balance
+    );
     Ok(())
 }
