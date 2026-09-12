@@ -1,0 +1,12 @@
+[package]
+name = "registrar-opener-stub"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = "=5.29.0"
