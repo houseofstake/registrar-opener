@@ -260,6 +260,39 @@ fn a_two_character_name_is_refused() {
 }
 
 #[test]
+#[should_panic(expected = "somebody's derived address")]
+fn an_implicit_account_id_cannot_be_added_to_a_batch() {
+    let mut contract = installed();
+    drafted(
+        &mut contract,
+        &["98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6648cdf0dbd6de"],
+    );
+}
+
+#[test]
+#[should_panic(expected = "discard a batch before drafting another")]
+fn the_operator_cannot_hoard_batches_against_the_accounts_storage() {
+    let mut contract = installed();
+    as_account(operator(), NOTHING);
+    for _ in 0..=MAX_LIVE_BATCHES {
+        contract.create_batch(owner_key(), FUNDING);
+    }
+}
+
+#[test]
+fn discarding_frees_a_slot_for_the_next_batch() {
+    let mut contract = installed();
+    as_account(operator(), NOTHING);
+    let mut ids = Vec::new();
+    for _ in 0..MAX_LIVE_BATCHES {
+        ids.push(contract.create_batch(owner_key(), FUNDING));
+    }
+    contract.discard_batch(ids[0]);
+    let reopened = contract.create_batch(owner_key(), FUNDING);
+    assert!(contract.get_batch(reopened).is_some());
+}
+
+#[test]
 #[should_panic(expected = "only the current operator may call this")]
 fn a_stranger_cannot_draft_a_batch() {
     let mut contract = installed();
@@ -392,12 +425,63 @@ fn a_stranded_batch_can_be_discarded_to_reclaim_its_storage() {
 }
 
 #[test]
-#[should_panic(expected = "an approved batch on the current operator cannot be discarded")]
+#[should_panic(expected = "an approved batch still holding names cannot be discarded")]
 fn a_live_approved_batch_cannot_be_discarded() {
     let mut contract = installed();
     let batch_id = approved(&mut contract, &["aaa"]);
     as_account(operator(), NOTHING);
     contract.discard_batch(batch_id);
+}
+
+#[test]
+fn the_admin_can_revoke_an_approved_batch_that_can_never_drain() {
+    let mut contract = installed();
+    let stuck = approved(&mut contract, &["aaa"]);
+    as_account(operator(), NOTHING);
+    for index in 1..MAX_LIVE_BATCHES {
+        drafted(&mut contract, &[format!("bb{index}").as_str()]);
+    }
+    as_account(admin(), NOTHING);
+    contract.discard_batch(stuck);
+    assert!(contract.get_batch(stuck).is_none());
+
+    as_account(operator(), NOTHING);
+    let next = contract.create_batch(owner_key(), FUNDING);
+    assert!(
+        contract.get_batch(next).is_some(),
+        "revoking an undrainable batch did not free its slot"
+    );
+}
+
+#[test]
+#[should_panic(expected = "an approved batch still holding names cannot be discarded")]
+fn the_operator_cannot_discard_a_batch_the_council_approved() {
+    let mut contract = installed();
+    let batch_id = approved(&mut contract, &["aaa", "bbb"]);
+    as_account(operator(), FUNDING);
+    contract.open_names(batch_id, names(&["aaa"]));
+    as_account(operator(), NOTHING);
+    contract.discard_batch(batch_id);
+}
+
+#[test]
+fn a_fully_opened_batch_can_be_discarded_so_its_slot_comes_back() {
+    let mut contract = installed();
+    let mut ids = Vec::new();
+    for index in 0..MAX_LIVE_BATCHES {
+        let name = format!("aa{index}");
+        let batch_id = approved(&mut contract, &[name.as_str()]);
+        as_account(operator(), FUNDING);
+        contract.open_names(batch_id, names(&[name.as_str()]));
+        ids.push(batch_id);
+    }
+    as_account(operator(), NOTHING);
+    contract.discard_batch(ids[0]);
+    let next = contract.create_batch(owner_key(), FUNDING);
+    assert!(
+        contract.get_batch(next).is_some(),
+        "a spent batch did not free its slot, the operator is bricked at the cap"
+    );
 }
 
 #[test]

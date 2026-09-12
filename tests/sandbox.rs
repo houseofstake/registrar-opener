@@ -7,9 +7,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const FUNDING: NearToken = NearToken::from_millinear(10);
-const BOND: NearToken = NearToken::from_near(1);
 const YOCTO: NearToken = NearToken::from_yoctonear(1);
-const COUNCIL_SIZE: usize = 5;
+const DAO_ACCOUNT: &str = "hos-root.sputnik-dao.near";
 const COUNCIL_THRESHOLD: usize = 3;
 const SANDBOX_DELAY_NS: u64 = 2_000_000_000;
 const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v1";
@@ -173,20 +172,76 @@ async fn patch_registrar(
     Ok(Contract::from_secret_key(id, sk.clone(), worker))
 }
 
-async fn deploy_dao(worker: &Worker<Sandbox>, council: &[Account]) -> Result<Contract> {
-    let dao = worker
-        .dev_deploy(&fixture("sputnik-dao-v2.3.1.wasm")?)
+fn dao_policy() -> Result<serde_json::Value> {
+    Ok(serde_json::from_slice(&fixture(
+        "hos-root-dao-policy.json",
+    )?)?)
+}
+
+fn policy_bond() -> Result<NearToken> {
+    let raw = dao_policy()?["proposal_bond"]
+        .as_str()
+        .context("the policy carries no proposal bond")?
+        .parse::<u128>()?;
+    Ok(NearToken::from_yoctonear(raw))
+}
+
+async fn seat_account(
+    worker: &Worker<Sandbox>,
+    id: &near_workspaces::AccountId,
+    seed: &str,
+) -> Result<Account> {
+    let sk = SecretKey::from_seed(KeyType::ED25519, seed);
+    worker
+        .patch(id)
+        .access_key(sk.public_key(), near_workspaces::AccessKey::full_access())
+        .account(near_workspaces::AccountDetailsPatch::default().balance(NearToken::from_near(100)))
+        .transact()
         .await?;
-    let members: Vec<&str> = council.iter().map(|member| member.id().as_str()).collect();
+    Ok(Account::from_secret_key(id.clone(), sk, worker))
+}
+
+async fn council_accounts(worker: &Worker<Sandbox>) -> Result<Vec<Account>> {
+    let policy = dao_policy()?;
+    let members = policy["roles"][0]["kind"]["Group"]
+        .as_array()
+        .context("the policy carries no member group")?
+        .clone();
+    let mut seats = Vec::new();
+    for (index, member) in members.iter().enumerate() {
+        let id: near_workspaces::AccountId =
+            member.as_str().context("member is not a string")?.parse()?;
+        seats.push(seat_account(worker, &id, &format!("council-seat-{index}")).await?);
+    }
+    Ok(seats)
+}
+
+async fn deploy_dao(worker: &Worker<Sandbox>) -> Result<Contract> {
+    let id: near_workspaces::AccountId = DAO_ACCOUNT.parse()?;
+    let sk = SecretKey::from_seed(KeyType::ED25519, "hos-root-dao");
+    worker
+        .patch(&id)
+        .code(&fixture("sputnik-dao-v2.3.1.wasm")?)
+        .access_key(sk.public_key(), near_workspaces::AccessKey::full_access())
+        .account(near_workspaces::AccountDetailsPatch::default().balance(NearToken::from_near(100)))
+        .transact()
+        .await?;
+    let dao = Contract::from_secret_key(id, sk, worker);
     dao.call("new")
         .args_json(json!({
-            "config": { "name": "opener", "purpose": "open top level names", "metadata": "" },
-            "policy": members,
+            "config": { "name": "hos-root", "purpose": "House of Stake", "metadata": "" },
+            "policy": dao_policy()?,
         }))
         .max_gas()
         .transact()
         .await?
         .into_result()?;
+    let live: serde_json::Value = dao.view("get_policy").await?.json()?;
+    assert_eq!(
+        live,
+        dao_policy()?,
+        "the sandbox DAO did not adopt mainnet's own policy"
+    );
     Ok(dao)
 }
 
@@ -210,11 +265,8 @@ async fn setup() -> Result<Fleet> {
     let sk = SecretKey::from_seed(KeyType::ED25519, "registrar-opener");
     let registrar = patch_registrar(&worker, &ours_wasm()?, &sk).await?;
 
-    let mut council = Vec::new();
-    for _ in 0..COUNCIL_SIZE {
-        council.push(worker.dev_create_account().await?);
-    }
-    let dao = deploy_dao(&worker, &council).await?;
+    let council = council_accounts(&worker).await?;
+    let dao = deploy_dao(&worker).await?;
     let operator = worker.dev_create_account().await?;
     let stranger = worker.dev_create_account().await?;
     install_opener(&dao, &registrar, &operator).await?;
@@ -293,7 +345,7 @@ async fn dao_calls(
                 }
             }
         }))
-        .deposit(BOND)
+        .deposit(policy_bond()?)
         .max_gas()
         .transact()
         .await?
@@ -606,11 +658,8 @@ async fn the_opener_installs_over_mainnets_own_stored_state() -> Result<()> {
     let before = worker.view_state(registrar.id()).await?;
     assert_eq!(before.len(), 10, "mainnet carries ten rows");
 
-    let mut council = Vec::new();
-    for _ in 0..COUNCIL_SIZE {
-        council.push(worker.dev_create_account().await?);
-    }
-    let dao = deploy_dao(&worker, &council).await?;
+    let council = council_accounts(&worker).await?;
+    let dao = deploy_dao(&worker).await?;
     let operator = worker.dev_create_account().await?;
     let stranger = worker.dev_create_account().await?;
 
@@ -696,7 +745,7 @@ async fn fewer_votes_than_the_threshold_leave_the_batch_unapproved() -> Result<(
     let fleet = setup().await?;
     let batch_id = draft(&fleet, &["alpha"]).await?;
     let digest = digest_of(&fleet, batch_id).await?;
-    dao_calls(
+    let proposal_id = dao_calls(
         &fleet,
         "approve_batch",
         json!({ "batch_id": batch_id, "digest": digest }),
@@ -704,6 +753,16 @@ async fn fewer_votes_than_the_threshold_leave_the_batch_unapproved() -> Result<(
         COUNCIL_THRESHOLD - 1,
     )
     .await?;
+    let proposal: serde_json::Value = fleet
+        .dao
+        .view("get_proposal")
+        .args_json(json!({ "id": proposal_id }))
+        .await?
+        .json()?;
+    assert_eq!(
+        proposal["status"], "InProgress",
+        "the proposal never reached the council, so this proves nothing: {proposal}"
+    );
     assert_eq!(
         batch_view(&fleet, batch_id).await?["approved"],
         false,
@@ -949,6 +1008,66 @@ async fn an_upgrade_lands_only_after_the_delay_and_carries_the_state_across() ->
 }
 
 #[tokio::test]
+async fn discarding_a_stranded_batch_gives_back_every_byte_it_took() -> Result<()> {
+    let fleet = setup().await?;
+    let baseline = fleet
+        .worker
+        .view_account(fleet.registrar.id())
+        .await?
+        .storage_usage;
+
+    let names: Vec<String> = (0..40).map(|index| format!("waste{index:03}")).collect();
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+    let batch_id = draft(&fleet, &borrowed).await?;
+    let held = fleet
+        .worker
+        .view_account(fleet.registrar.id())
+        .await?
+        .storage_usage;
+    assert!(
+        held > baseline,
+        "a 40 name batch cost no storage, so this measures nothing"
+    );
+
+    dao_calls(
+        &fleet,
+        "change_operator",
+        json!({ "operator": fleet.stranger.id() }),
+        YOCTO,
+        COUNCIL_THRESHOLD,
+    )
+    .await?;
+    fleet
+        .stranger
+        .call(fleet.registrar.id(), "discard_batch")
+        .args_json(json!({ "batch_id": batch_id }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let after = fleet
+        .worker
+        .view_account(fleet.registrar.id())
+        .await?
+        .storage_usage;
+    assert_eq!(
+        after,
+        baseline,
+        "discard left {} bytes behind, the nested name set did not clear",
+        after.saturating_sub(baseline)
+    );
+    assert!(fleet
+        .registrar
+        .view("get_batch")
+        .args_json(json!({ "batch_id": batch_id }))
+        .await?
+        .json::<Option<serde_json::Value>>()?
+        .is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_failed_upgrade_leaves_the_approval_standing_for_a_retry() -> Result<()> {
     let fleet = setup().await?;
     let junk = b"this is not a wasm module".to_vec();
@@ -1056,6 +1175,53 @@ async fn a_stranger_cannot_drive_any_privileged_method() -> Result<()> {
             "a stranger reached {method}: {outcome:#?}"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_registrar_key_cannot_forge_a_callback_into_an_approved_batch() -> Result<()> {
+    let fleet = setup().await?;
+    let batch_id = draft(&fleet, &["alpha"]).await?;
+    approve(&fleet, batch_id).await?;
+    open(&fleet, batch_id, &["alpha"], Gas::from_tgas(300))
+        .await?
+        .into_result()?;
+    assert_eq!(batch_view(&fleet, batch_id).await?["remaining"], 0);
+
+    let forged = fleet
+        .registrar
+        .call("on_name_opened")
+        .args_json(json!({
+            "batch_id": batch_id,
+            "operator_epoch": 0,
+            "name": "smuggled",
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        forged.is_failure(),
+        "a registrar key forged a callback: {forged:#?}"
+    );
+    assert!(
+        format!("{forged:#?}").contains("expected a single result"),
+        "refused for the wrong reason: {forged:#?}"
+    );
+
+    let batch = batch_view(&fleet, batch_id).await?;
+    assert_eq!(
+        batch["remaining"], 0,
+        "a name the council never approved entered the batch"
+    );
+    assert_eq!(
+        fleet
+            .registrar
+            .view("opener_view")
+            .await?
+            .json::<serde_json::Value>()?["failed"],
+        0,
+        "the forged call moved the counters"
+    );
     Ok(())
 }
 

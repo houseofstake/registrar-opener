@@ -21,6 +21,7 @@ const GAS_FOR_UPGRADE_CALLBACK: Gas = Gas::from_tgas(5);
 const MAX_NAMES_PER_CALL: usize = 20;
 const MAX_NAMES_PER_ADD: usize = 100;
 const MAX_NAMES_PER_BATCH: u32 = 600;
+const MAX_LIVE_BATCHES: u32 = 4;
 const MIN_TLA_LEN: usize = 3;
 const MAX_TLA_LEN: usize = 64;
 const MIN_FUNDING: NearToken = NearToken::from_millinear(10);
@@ -64,7 +65,7 @@ mod error {
     pub const BATCH_STALE: &str = "the batch belongs to a replaced operator";
     pub const BATCH_EMPTY: &str = "the batch holds no names";
     pub const BATCH_FULL: &str = "the batch is at the per batch name limit";
-    pub const BATCH_LIVE: &str = "an approved batch on the current operator cannot be discarded";
+    pub const BATCH_LIVE: &str = "an approved batch still holding names cannot be discarded";
     pub const DIGEST_MISMATCH: &str = "digest does not match the batch contents";
     pub const NOT_IN_BATCH: &str = "name is not in this batch";
     pub const EMPTY_NAMES: &str = "no names supplied";
@@ -73,6 +74,10 @@ mod error {
     pub const NOT_TOP_LEVEL: &str = "name is not a top level account";
     pub const NAME_TOO_SHORT: &str = "top level name is short enough to be forgeable";
     pub const NAME_TOO_LONG: &str = "name exceeds the account id limit";
+    pub const NAME_IS_IMPLICIT: &str = "an implicit account id is somebody's derived address";
+    pub const TOO_MANY_BATCHES: &str = "discard a batch before drafting another";
+    pub const BATCH_IDS_EXHAUSTED: &str = "batch ids are exhausted, reusing one would alias its \
+                                           stored names";
     pub const GAS_TOO_LOW: &str = "attach more gas or send fewer names";
     pub const FUNDING_TOO_LOW: &str = "funding is below the account storage floor";
     pub const DEPOSIT_MISMATCH: &str = "attached deposit must be the funding times the name count";
@@ -135,6 +140,10 @@ fn assert_names_openable(names: &[AccountId]) {
         require!(!raw.contains('.'), error::NOT_TOP_LEVEL);
         require!(raw.len() >= MIN_TLA_LEN, error::NAME_TOO_SHORT);
         require!(raw.len() <= MAX_TLA_LEN, error::NAME_TOO_LONG);
+        require!(
+            !name.get_account_type().is_implicit(),
+            error::NAME_IS_IMPLICIT
+        );
     }
 }
 
@@ -337,7 +346,7 @@ impl RegistrarOpener {
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_CALLBACK)
-                    .on_name_opened(None, 0, None),
+                    .on_name_opened(None, self.operator_epoch, None),
             )
     }
 
@@ -419,8 +428,14 @@ impl RegistrarOpener {
     pub fn create_batch(&mut self, owner_key: PublicKey, funding: NearToken) -> u32 {
         self.assert_operator();
         require!(funding >= MIN_FUNDING, error::FUNDING_TOO_LOW);
+        require!(
+            self.batches.len() < MAX_LIVE_BATCHES,
+            error::TOO_MANY_BATCHES
+        );
         let batch_id = self.next_batch_id;
-        self.next_batch_id = batch_id.saturating_add(1);
+        self.next_batch_id = batch_id.checked_add(1).unwrap_or_else(|| {
+            env::panic_str(error::BATCH_IDS_EXHAUSTED);
+        });
         let batch = Batch {
             operator: self.operator.clone(),
             operator_epoch: self.operator_epoch,
@@ -475,15 +490,20 @@ impl RegistrarOpener {
             caller == self.operator || caller == self.admin,
             error::ONLY_ADMIN_OR_OPERATOR
         );
+        let revoking = caller == self.admin;
         let epoch = self.operator_epoch;
         let batch = self.batch_mut(batch_id);
         let stale = batch.operator_epoch != epoch;
-        require!(stale || !batch.approved, error::BATCH_LIVE);
+        let spent = batch.names.is_empty();
+        require!(
+            revoking || stale || spent || !batch.approved,
+            error::BATCH_LIVE
+        );
         batch.names.clear();
         self.batches.remove(&batch_id);
         emit(
             "batch_discarded",
-            serde_json::json!({"batch_id": batch_id, "stale": stale}),
+            serde_json::json!({"batch_id": batch_id, "stale": stale, "revoked": revoking}),
         );
     }
 

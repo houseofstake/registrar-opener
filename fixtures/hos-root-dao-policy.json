@@ -1,0 +1,29 @@
+{
+  "roles": [
+    {
+      "name": "Admin",
+      "kind": {
+        "Group": [
+          "anton-near-one.near",
+          "c65255255d689f74ae46b0a89f04bbaab94d3a51ab9dc4b79b1e9b61e7cf6816",
+          "as.near",
+          "root.near",
+          "norfolks.near"
+        ]
+      },
+      "permissions": [
+        "*:*"
+      ],
+      "vote_policy": {}
+    }
+  ],
+  "default_vote_policy": {
+    "weight_kind": "RoleWeight",
+    "quorum": "0",
+    "threshold": "3"
+  },
+  "proposal_bond": "100000000000000000000000",
+  "proposal_period": "604800000000000",
+  "bounty_bond": "100000000000000000000000",
+  "bounty_forgiveness_period": "604800000000000"
+}

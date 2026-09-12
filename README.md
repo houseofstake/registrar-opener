@@ -42,24 +42,38 @@ ever walks the whole batch and `approve_batch` is a single 32 byte comparison. A
 recompute the digest off chain from the published list, which is what makes the vote meaningful;
 `the_stored_digest_is_the_one_an_outside_observer_computes` does exactly that in the test suite.
 
-Limits are 20 names per open call and 600 per batch. The per call number comes from gas, 14 Tgas
-per name against the 300 Tgas a transaction carries, asserted at compile time next to the
-constant and measured on chain in
-`the_documented_per_call_maximum_fits_and_every_name_lands`.
+Limits are 20 names per open call, 600 per batch, and 4 live batches. The per call number comes
+from gas, 14 Tgas per name against the 300 Tgas a transaction carries, asserted at compile time
+next to the constant and measured on chain in
+`the_documented_per_call_maximum_fits_and_every_name_lands`. The batch cap bounds what the
+operator can make `registrar` pay for in storage, since the names live in the account's own state.
+
+Names must be top level, between 3 and 64 bytes, and not an implicit address. The last one uses
+the protocol's own `get_account_type().is_implicit()`, so it covers NEAR implicit accounts,
+Ethereum implicit accounts and NEP-616 deterministic addresses rather than a hand rolled hex
+check. Opening one would squat an address somebody else derives from their own key.
 
 `open_names` is payable and demands exactly `funding * count`. The operator pays for the accounts
 they open, so `registrar` never holds a float. It also means a function call access key can never
 reach the method, because the protocol forbids those keys from attaching a deposit.
 
 A create that fails returns its slot to the batch in the callback, so a batch that half lands can
-be finished without another vote.
+be finished without another vote. The account create, the transfer and the key are one batched
+receipt, so either all three land or none do and there is no half opened account to reconcile.
 
-## Replacing the operator is the revoke
+## Revoking
+
+Two mechanisms, because they answer different failures.
 
 `change_operator` bumps an epoch, and every batch, drafted or approved, is pinned to the epoch it
-was built under. So replacing a compromised operator strands their approved batches in the same
-transaction, with no separate revoke call and no fourth admin action. The stranded batches can
-then be discarded by whoever holds the role, to reclaim the storage.
+was built under. So replacing a compromised operator strands every one of their batches in the
+same transaction, with no separate revoke call. That is the blunt instrument for a lost key.
+
+The admin can also discard any single batch, which is the council withdrawing an approval it
+already gave. The operator cannot: they may only discard a draft, a batch stranded by an epoch
+bump, or one whose names have all been opened. That asymmetry matters in a case that needs no
+attacker at all. If the same name sits in two approved batches and is opened from the first, the
+second can never drain, so without the admin path it would hold one of the four slots forever.
 
 The worst a compromised operator can do is open names the council already approved, to the key the
 council already saw.
@@ -156,13 +170,17 @@ Toolchain is pinned in `rust-toolchain.toml`.
     cargo build -p registrar-opener-stub --target wasm32-unknown-unknown --release
     cargo test --test sandbox
 
-The sandbox tests need both wasms, so build before running them. They stand up a real Sputnik DAO
-from the code that `hos-root.sputnik-dao.near` is running, deploy this contract onto an account
-named `registrar` in a local nearcore, and drive the whole flow through DAO proposals: a batch is
-drafted, voted on by three of five council members, and the operator opens genuine top level
-accounts. They also cover the refusals, the threshold, the epoch strand, the slot return, an
-upgrade landing only after its delay with the batch state intact, a failed deploy leaving the
-approval standing, and both install routes against mainnet's replayed state.
+The sandbox tests need both wasms, so build before running them. Nothing about the governance in
+them is invented. They stand `hos-root.sputnik-dao.near` up at that exact account id, running the
+code it runs on mainnet, adopting the policy it has on mainnet, with its five real member accounts
+and its real threshold of three. The contract goes onto an account named `registrar`, and the flow
+runs through genuine DAO proposals: a batch is drafted, three of the five real members vote, and
+the operator opens genuine top level accounts.
+
+They also cover the refusals, the threshold stopping one vote short, the epoch strand, the admin
+revoke, the slot return, storage reclaim measured in bytes, an upgrade landing only after its
+delay with the batch state intact, a failed deploy leaving the approval standing, a registrar key
+failing to forge a callback, and both install routes against mainnet's replayed state.
 
 Lint is two passes, because the sandbox dev dependencies cannot build for wasm:
 
@@ -224,9 +242,27 @@ against a download, by comparing `code_hash` from `view_account` with base58 of 
 sha256. Today that is `HRP7Qf2HDaXTD8EWs7G8siNNGxWWBCe1JaDxcM2cJmQR` for `registrar` and
 `4zSoHkLjJWZm34Psd4Eq2WUXHELt6LxtKmUXpsZWAECp` for the DAO.
 
-The sandbox builds its own DAO with its own members rather than replaying mainnet's policy. That
-policy is five members with a majority threshold, which is three votes, matching what
-`hos-root.sputnik-dao.near` runs today.
+`fixtures/hos-root-dao-policy.json` is the live policy of `hos-root.sputnik-dao.near`, read with
+`get_policy` from two independent providers with identical responses. The sandbox initialises its
+DAO with that exact object and asserts `get_policy` returns it unchanged, so the roles, the five
+member accounts, the `RoleWeight` threshold of three, the bond and the proposal period are
+mainnet's rather than a reproduction. Refresh it with:
+
+    curl -s -X POST https://rpc.mainnet.near.org -H 'Content-Type: application/json' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function",
+           "finality":"final","account_id":"hos-root.sputnik-dao.near",
+           "method_name":"get_policy","args_base64":"e30="}}' \
+      | jq -r '[.result.result[]] | implode' | jq .
+
+The member accounts are created in the sandbox holding test keys, which is the only way any test
+can vote as them, and the DAO sees the votes arrive from those account ids exactly as it would on
+mainnet.
+
+The multisig install test is the one place a signer is added rather than reused. Mainnet's four
+multisig members are bare public keys, and no private key exists for them outside their holders,
+so the test keeps all four untouched and appends two seats it can sign with, moving only the
+member count in `STATE` from four to six. The threshold, the request nonce and every other byte
+stay mainnet's, and the multisig's execution path does not branch on which member confirms.
 
 ## tests/testnet.rs
 
@@ -247,19 +283,6 @@ test's own assertions: `code_hash` came back
 answered with the right admin, operator and a `mainnet_upgrade_delay_ns` of 172800000000000, and
 `get_members` returned `MethodResolveError(MethodNotFound)`.
 
-## What is not proven
+## Status
 
-Mainnet's registrar code, stored state, threshold and request nonce are all replayed exactly, and
-both install routes run against them.
-
-Two things are reproduced rather than replayed, both for the same reason, that they need private
-keys nobody here holds:
-
-- The DAO the tests vote through is built by the test with its own members. Its policy is five
-  members at a majority threshold, which is three votes, matching what `hos-root.sputnik-dao.near`
-  runs today, but they are not the same accounts.
-- The multisig route is driven by two seats appended to mainnet's member set rather than by
-  mainnet's own four keys. The set's other four entries, the threshold and the nonce are
-  untouched, so the only substitution is which keys sign.
-
-The install sequence has run on live testnet twice. Nothing here has run on mainnet.
+The install sequence has run on live testnet twice. Nothing here has run on mainnet yet.
