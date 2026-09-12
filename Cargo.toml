@@ -1,0 +1,33 @@
+[package]
+name = "registrar-opener"
+version = "0.1.0"
+edition = "2018"
+rust-version = "1.86"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints.clippy]
+assign_op_pattern = "allow"
+implicit_saturating_sub = "allow"
+int_plus_one = "allow"
+to_string_trait_impl = "allow"
+useless_conversion = "allow"
+
+[dependencies]
+near-sdk = "4.0.0-pre.4"
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true
+
+[dev-dependencies]
+near-workspaces = "=0.22.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+serde_json = "1"
+anyhow = "1"
