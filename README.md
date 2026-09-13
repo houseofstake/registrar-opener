@@ -26,6 +26,8 @@ NEAR account holds one contract.
     add_names(batch_id, names)                       operator, draft only
     approve_batch(batch_id, digest)                  admin
     open_names(batch_id, names)                      operator, approved only, payable
+    discard_batch(batch_id)                          operator on a draft, admin on anything
+    forget_names(batch_id, names)                    operator or admin, discarded batches only
 
 A batch carries the exact names, one full access key that every opened account receives, and the
 funding each account is created with. The approval is bound to a digest over all three, so editing
@@ -42,11 +44,29 @@ ever walks the whole batch and `approve_batch` is a single 32 byte comparison. A
 recompute the digest off chain from the published list, which is what makes the vote meaningful;
 `the_stored_digest_is_the_one_an_outside_observer_computes` does exactly that in the test suite.
 
-Limits are 20 names per open call, 600 per batch, and 4 live batches. The per call number comes
-from gas, 14 Tgas per name against the 300 Tgas a transaction carries, asserted at compile time
-next to the constant and measured on chain in
-`the_documented_per_call_maximum_fits_and_every_name_lands`. The batch cap bounds what the
-operator can make `registrar` pay for in storage, since the names live in the account's own state.
+A batch has no size limit. Names sit in a `LookupSet`, which cannot be iterated and has no length,
+so a name is one storage record and the only thing the contract ever does to one is a single
+`storage_has_key`, `storage_write` or `storage_remove`. No call reads more than one name, so no
+batch is large enough to make one collapse. That record measures 57 bytes on chain, and opening
+the name hands it straight back, which
+`a_name_costs_one_record_and_opening_it_gives_that_record_back` asserts in both directions.
+
+Limits are 20 names per open call and 4 live batches. The per call number comes from gas, 14 Tgas
+per name against the 300 Tgas a transaction carries, asserted at compile time next to the constant
+and measured on chain in `the_documented_per_call_maximum_fits_and_every_name_lands`.
+
+What a set nothing can enumerate costs is that discarding a batch cannot return the records of
+names that were never opened. Those keys are already unreachable, since every read goes through
+the batch record discarding removed, but they would sit on the account forever, so `forget_names`
+deletes them, 100 per call, refusing any batch that is still live so it cannot reach into one the
+council is using.
+
+Keying names by batch id also puts weight on something that used to be only hygiene.
+`next_batch_id` only ever climbs and panics rather than wrapping, and neither `new` nor `migrate`
+will reset it. An id that came round again would inherit whatever the dead batch stranded under
+the same prefix, which lets a revoked approval come back rather than staying revoked. Only the
+operator can call `open_names`, so that was never a way in for anyone else, but a revoke should
+stay a revoke.
 
 Names must be top level, between 3 and 64 bytes, and not an implicit address. The last one uses
 the protocol's own `get_account_type().is_implicit()`, so it covers NEAR implicit accounts,
@@ -75,7 +95,8 @@ The admin can discard any batch, which is the council withdrawing an approval it
 operator can only discard a draft or a batch whose names have all been opened. That asymmetry
 matters in a case that needs no attacker at all. If the same name sits in two approved batches and
 is opened from the first, the second can never drain, so without the admin path it would hold one
-of the four slots forever.
+of the four slots forever. Either way discarding is a single write, since nothing has to be walked
+to tear a batch down.
 
 The worst a compromised operator can do is open names the council already approved, to the key the
 council already saw.
@@ -175,7 +196,8 @@ the operator opens genuine top level accounts.
 
 They also cover the refusals, the threshold stopping one vote short, an operator replacement
 locking the old one out while the new one finishes the batch, the admin revoke, the slot return,
-storage reclaim measured in bytes, a DAO driven upgrade carrying the batch state across, a failed
+a stranded batch forgotten back to the exact byte it started on, a batch id proven never to be
+reissued, a DAO driven upgrade carrying the batch state across, a failed
 deploy leaving the contract working, the operator being refused an upgrade, a registrar key
 failing to forge a callback, and both install routes against mainnet's replayed state.
 

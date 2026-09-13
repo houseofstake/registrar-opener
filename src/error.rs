@@ -14,8 +14,8 @@ pub const NO_BATCH: &str = "no batch with that id";
 pub const BATCH_APPROVED: &str = "the batch is approved and can no longer be edited";
 pub const BATCH_NOT_APPROVED: &str = "the batch has not been approved";
 pub const BATCH_EMPTY: &str = "the batch holds no names";
-pub const BATCH_FULL: &str = "the batch is at the per batch name limit";
 pub const BATCH_LIVE: &str = "an approved batch still holding names cannot be discarded";
+pub const BATCH_NOT_DISCARDED: &str = "discard the batch before forgetting what it held";
 pub const TOO_MANY_BATCHES: &str = "discard a batch before drafting another";
 pub const BATCH_IDS_EXHAUSTED: &str = "batch ids are exhausted, reusing one would alias its \
                                        stored names";

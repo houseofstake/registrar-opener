@@ -118,6 +118,15 @@ impl RegistrarOpener {
         );
     }
 
+    fn assert_admin_or_operator(&self) -> AccountId {
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == self.operator || caller == self.admin,
+            error::ONLY_ADMIN_OR_OPERATOR
+        );
+        caller
+    }
+
     fn batch_mut(&mut self, batch_id: u32) -> &mut Batch {
         self.batches
             .get_mut(&batch_id)

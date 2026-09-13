@@ -17,7 +17,7 @@ impl RegistrarOpener {
         self.assert_admin();
         let batch = self.batch_mut(batch_id);
         require!(!batch.approved, error::BATCH_APPROVED);
-        require!(!batch.names.is_empty(), error::BATCH_EMPTY);
+        require!(batch.remaining > 0, error::BATCH_EMPTY);
         require!(
             batch.digest == CryptoHash::from(digest),
             error::DIGEST_MISMATCH

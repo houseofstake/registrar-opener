@@ -7,7 +7,7 @@ use near_sdk::{
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::batch::{MAX_LIVE_BATCHES, MAX_NAMES_PER_ADD, MAX_NAMES_PER_BATCH};
+use crate::batch::{MAX_LIVE_BATCHES, MAX_NAMES_PER_ADD};
 
 const NOTHING: NearToken = NearToken::from_yoctonear(0);
 const YOCTO: NearToken = NearToken::from_yoctonear(1);
@@ -438,6 +438,79 @@ fn the_operator_cannot_discard_a_batch_the_council_approved() {
 }
 
 #[test]
+fn a_discarded_batch_id_is_never_reissued_to_a_later_batch() {
+    let mut contract = installed();
+    let first = drafted(&mut contract, &["aaa"]);
+    as_account(operator(), NOTHING);
+    contract.discard_batch(first);
+    let second = drafted(&mut contract, &["bbb"]);
+    assert_ne!(
+        first, second,
+        "a reissued id would inherit every name the dead batch stored"
+    );
+    assert!(
+        !contract.is_in_batch(second, "aaa".parse().unwrap()),
+        "the new batch can open a name the council never approved for it"
+    );
+}
+
+#[test]
+fn forgetting_frees_the_names_a_discarded_batch_stranded() {
+    let mut contract = installed();
+    let batch_id = drafted(&mut contract, &["aaa", "bbb"]);
+    as_account(operator(), NOTHING);
+    contract.discard_batch(batch_id);
+    assert_eq!(contract.forget_names(batch_id, names(&["aaa", "bbb"])), 2);
+    assert_eq!(
+        contract.forget_names(batch_id, names(&["aaa", "bbb"])),
+        0,
+        "forgetting reported work it did not do the second time"
+    );
+}
+
+#[test]
+#[should_panic(expected = "discard the batch before forgetting what it held")]
+fn a_live_batch_cannot_have_its_names_forgotten() {
+    let mut contract = installed();
+    let batch_id = drafted(&mut contract, &["aaa"]);
+    as_account(operator(), NOTHING);
+    contract.forget_names(batch_id, names(&["aaa"]));
+}
+
+#[test]
+#[should_panic(expected = "no batch with that id")]
+fn a_batch_id_that_was_never_issued_cannot_be_forgotten() {
+    let mut contract = installed();
+    as_account(operator(), NOTHING);
+    contract.forget_names(7, names(&["aaa"]));
+}
+
+#[test]
+#[should_panic(expected = "only the admin or the operator may call this")]
+fn a_stranger_cannot_forget_names() {
+    let mut contract = installed();
+    let batch_id = drafted(&mut contract, &["aaa"]);
+    as_account(operator(), NOTHING);
+    contract.discard_batch(batch_id);
+    as_account(stranger(), NOTHING);
+    contract.forget_names(batch_id, names(&["aaa"]));
+}
+
+#[test]
+fn forgetting_cannot_reach_a_name_a_live_batch_still_holds() {
+    let mut contract = installed();
+    let dead = drafted(&mut contract, &["aaa"]);
+    let live = drafted(&mut contract, &["bbb"]);
+    as_account(operator(), NOTHING);
+    contract.discard_batch(dead);
+    assert_eq!(contract.forget_names(dead, names(&["bbb"])), 0);
+    assert!(
+        contract.is_in_batch(live, "bbb".parse().unwrap()),
+        "forgetting one batch reached into another"
+    );
+}
+
+#[test]
 fn a_fully_opened_batch_can_be_discarded_so_its_slot_comes_back() {
     let mut contract = installed();
     let mut ids = Vec::new();
@@ -541,10 +614,8 @@ fn opening_takes_the_names_out_of_the_batch() {
     let batch = contract.get_batch(batch_id).unwrap();
     assert_eq!(batch.count, 2);
     assert_eq!(batch.remaining, 1);
-    assert_eq!(
-        contract.list_batch_names(batch_id, None, None),
-        names(&["bbb"])
-    );
+    assert!(!contract.is_in_batch(batch_id, "aaa".parse().unwrap()));
+    assert!(contract.is_in_batch(batch_id, "bbb".parse().unwrap()));
 }
 
 #[test]
@@ -677,13 +748,12 @@ fn a_call_cannot_carry_more_names_than_the_documented_maximum() {
 }
 
 #[test]
-#[should_panic(expected = "the batch is at the per batch name limit")]
-fn a_batch_cannot_grow_past_the_cohort_ceiling() {
+fn a_batch_grows_past_any_ceiling_and_costs_one_lookup_to_check() {
     let mut contract = installed();
     as_account(operator(), NOTHING);
     let batch_id = contract.create_batch(owner_key(), FUNDING);
     let mut added = 0u32;
-    while added <= MAX_NAMES_PER_BATCH {
+    while added < 1000 {
         let chunk: Vec<AccountId> = (0..MAX_NAMES_PER_ADD)
             .map(|index| {
                 format!("name{:06}", added as usize + index)
@@ -694,4 +764,9 @@ fn a_batch_cannot_grow_past_the_cohort_ceiling() {
         contract.add_names(batch_id, chunk);
         added += MAX_NAMES_PER_ADD as u32;
     }
+    let batch = contract.get_batch(batch_id).unwrap();
+    assert_eq!(batch.count, 1000);
+    assert_eq!(batch.remaining, 1000);
+    assert!(contract.is_in_batch(batch_id, "name000999".parse().unwrap()));
+    assert!(!contract.is_in_batch(batch_id, "name001000".parse().unwrap()));
 }

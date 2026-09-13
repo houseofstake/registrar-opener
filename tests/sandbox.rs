@@ -301,6 +301,14 @@ async fn draft(fleet: &Fleet, names: &[&str]) -> Result<u32> {
     Ok(batch_id)
 }
 
+async fn storage_of(fleet: &Fleet) -> Result<u64> {
+    Ok(fleet
+        .worker
+        .view_account(fleet.registrar.id())
+        .await?
+        .storage_usage)
+}
+
 async fn batch_view(fleet: &Fleet, batch_id: u32) -> Result<serde_json::Value> {
     Ok(fleet
         .registrar
@@ -1002,26 +1010,160 @@ async fn a_dao_upgrade_lands_and_carries_the_state_across() -> Result<()> {
 }
 
 #[tokio::test]
-async fn discarding_a_stranded_batch_gives_back_every_byte_it_took() -> Result<()> {
+async fn a_name_costs_one_record_and_opening_it_gives_that_record_back() -> Result<()> {
     let fleet = setup().await?;
-    let baseline = fleet
-        .worker
-        .view_account(fleet.registrar.id())
-        .await?
-        .storage_usage;
 
-    let names: Vec<String> = (0..40).map(|index| format!("waste{index:03}")).collect();
+    let small: Vec<String> = (0..10).map(|index| format!("costa{index:03}")).collect();
+    let small: Vec<&str> = small.iter().map(String::as_str).collect();
+    let before_small = storage_of(&fleet).await?;
+    let batch_id = draft(&fleet, &small).await?;
+    let ten = storage_of(&fleet).await? - before_small;
+
+    let large: Vec<String> = (0..20).map(|index| format!("costb{index:03}")).collect();
+    let large: Vec<&str> = large.iter().map(String::as_str).collect();
+    let before_large = storage_of(&fleet).await?;
+    draft(&fleet, &large).await?;
+    let twenty = storage_of(&fleet).await? - before_large;
+
+    let per_name = (twenty - ten) / 10;
+    assert_eq!(
+        ten - per_name * 10,
+        twenty - per_name * 20,
+        "a name is not one flat record, storage does not grow affinely with the count"
+    );
+
+    approve(&fleet, batch_id).await?;
+    let opened_from = storage_of(&fleet).await?;
+    open(&fleet, batch_id, &small[..5], Gas::from_tgas(300))
+        .await?
+        .into_result()?;
+    let after_open = storage_of(&fleet).await?;
+    assert_eq!(
+        opened_from - after_open,
+        per_name * 5,
+        "opening five names did not give back exactly their five records"
+    );
+    assert_eq!(
+        batch_view(&fleet, batch_id).await?["remaining"],
+        5,
+        "the counter and the removals disagree"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn forgetting_a_dead_batch_gives_back_every_byte_it_stranded() -> Result<()> {
+    let fleet = setup().await?;
+    let baseline = storage_of(&fleet).await?;
+
+    let names: Vec<String> = (0..150).map(|index| format!("waste{index:03}")).collect();
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+    let batch_id: u32 = fleet
+        .operator
+        .call(fleet.registrar.id(), "create_batch")
+        .args_json(json!({ "owner_key": fleet.owner_key, "funding": FUNDING }))
+        .max_gas()
+        .transact()
+        .await?
+        .json()?;
+    for chunk in borrowed.chunks(100) {
+        fleet
+            .operator
+            .call(fleet.registrar.id(), "add_names")
+            .args_json(json!({ "batch_id": batch_id, "names": chunk }))
+            .max_gas()
+            .transact()
+            .await?
+            .into_result()?;
+    }
+    assert!(
+        storage_of(&fleet).await? > baseline,
+        "a hundred and fifty name batch cost no storage, so this measures nothing"
+    );
+
+    fleet
+        .operator
+        .call(fleet.registrar.id(), "discard_batch")
+        .args_json(json!({ "batch_id": batch_id }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    let stranded = storage_of(&fleet).await?;
+    assert!(
+        stranded > baseline,
+        "discard reclaimed the names, so forgetting has nothing left to prove"
+    );
+
+    for chunk in borrowed.chunks(100) {
+        let freed: u32 = fleet
+            .operator
+            .call(fleet.registrar.id(), "forget_names")
+            .args_json(json!({ "batch_id": batch_id, "names": chunk }))
+            .max_gas()
+            .transact()
+            .await?
+            .json()?;
+        assert_eq!(freed, chunk.len() as u32);
+    }
+
+    let reclaimed = storage_of(&fleet).await?;
+    assert_eq!(
+        reclaimed,
+        baseline,
+        "forgetting left {} bytes behind",
+        reclaimed.saturating_sub(baseline)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_batch_id_is_never_reissued_so_stranded_names_cannot_be_inherited() -> Result<()> {
+    let fleet = setup().await?;
+    let first = draft(&fleet, &["alpha"]).await?;
+    fleet
+        .operator
+        .call(fleet.registrar.id(), "discard_batch")
+        .args_json(json!({ "batch_id": first }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+
+    let second = draft(&fleet, &["bravo"]).await?;
+    assert_ne!(first, second, "registrar reissued a batch id");
+    assert!(
+        !fleet
+            .registrar
+            .view("is_in_batch")
+            .args_json(json!({ "batch_id": second, "name": "alpha" }))
+            .await?
+            .json::<bool>()?,
+        "the new batch inherited a name the council never approved for it"
+    );
+
+    approve(&fleet, second).await?;
+    let forged = fleet
+        .operator
+        .call(fleet.registrar.id(), "open_names")
+        .args_json(json!({ "batch_id": second, "names": ["alpha"] }))
+        .deposit(FUNDING)
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        forged.is_failure(),
+        "a name stranded by the first batch was openable from the second: {forged:#?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn discarding_a_stranded_batch_is_one_call_whatever_it_holds() -> Result<()> {
+    let fleet = setup().await?;
+    let names: Vec<String> = (0..100).map(|index| format!("waste{index:03}")).collect();
     let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
     let batch_id = draft(&fleet, &borrowed).await?;
-    let held = fleet
-        .worker
-        .view_account(fleet.registrar.id())
-        .await?
-        .storage_usage;
-    assert!(
-        held > baseline,
-        "a 40 name batch cost no storage, so this measures nothing"
-    );
 
     dao_calls(
         &fleet,
@@ -1031,25 +1173,16 @@ async fn discarding_a_stranded_batch_gives_back_every_byte_it_took() -> Result<(
         COUNCIL_THRESHOLD,
     )
     .await?;
-    fleet
+    let discarded = fleet
         .stranger
         .call(fleet.registrar.id(), "discard_batch")
         .args_json(json!({ "batch_id": batch_id }))
         .max_gas()
         .transact()
-        .await?
-        .into_result()?;
-
-    let after = fleet
-        .worker
-        .view_account(fleet.registrar.id())
-        .await?
-        .storage_usage;
-    assert_eq!(
-        after,
-        baseline,
-        "discard left {} bytes behind, the nested name set did not clear",
-        after.saturating_sub(baseline)
+        .await?;
+    assert!(
+        discarded.is_success(),
+        "discarding a hundred name batch did not fit one call: {discarded:#?}"
     );
     assert!(fleet
         .registrar
@@ -1058,6 +1191,15 @@ async fn discarding_a_stranded_batch_gives_back_every_byte_it_took() -> Result<(
         .await?
         .json::<Option<serde_json::Value>>()?
         .is_none());
+    assert!(
+        !fleet
+            .registrar
+            .view("is_in_batch")
+            .args_json(json!({ "batch_id": batch_id, "name": borrowed[0] }))
+            .await?
+            .json::<bool>()?,
+        "a discarded batch still answers for its names"
+    );
     Ok(())
 }
 

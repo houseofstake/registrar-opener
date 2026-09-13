@@ -1,6 +1,6 @@
 use near_sdk::json_types::Base58CryptoHash;
 use near_sdk::serde_json;
-use near_sdk::store::IterableSet;
+use near_sdk::store::LookupSet;
 use near_sdk::utils::is_promise_success;
 use near_sdk::{env, near, require, AccountId, CryptoHash, Gas, NearToken, Promise, PublicKey};
 
@@ -12,7 +12,6 @@ pub const GAS_PER_NAME: Gas = Gas::from_tgas(14);
 pub const MIN_FUNDING: NearToken = NearToken::from_millinear(10);
 const MAX_NAMES_PER_CALL: usize = 20;
 pub const MAX_NAMES_PER_ADD: usize = 100;
-pub const MAX_NAMES_PER_BATCH: u32 = 600;
 pub const MAX_LIVE_BATCHES: u32 = 4;
 
 const _: () = assert!(
@@ -23,19 +22,15 @@ const _: () = assert!(
     GAS_FOR_CALLBACK.as_gas() < GAS_PER_NAME.as_gas(),
     "every name must budget more gas than its own callback spends"
 );
-const _: () = assert!(
-    MAX_NAMES_PER_BATCH >= 528,
-    "one batch must cover the launch cohort or the council votes twice"
-);
-
 #[near(serializers = [borsh])]
 pub struct Batch {
     pub approved: bool,
     pub digest: CryptoHash,
     pub count: u32,
+    pub remaining: u32,
     pub owner_key: PublicKey,
     pub funding: NearToken,
-    pub names: IterableSet<AccountId>,
+    pub names: LookupSet<AccountId>,
 }
 
 #[near]
@@ -55,9 +50,10 @@ impl RegistrarOpener {
             approved: false,
             digest: seed_digest(&owner_key, funding),
             count: 0,
+            remaining: 0,
             owner_key,
             funding,
-            names: IterableSet::new(StorageKey::BatchNames { batch_id }),
+            names: LookupSet::new(StorageKey::BatchNames { batch_id }),
         };
         self.batches.insert(batch_id, batch);
         emit(
@@ -73,14 +69,11 @@ impl RegistrarOpener {
         assert_openable(&names);
         let batch = self.batch_mut(batch_id);
         require!(!batch.approved, error::BATCH_APPROVED);
-        require!(
-            batch.count.saturating_add(names.len() as u32) <= MAX_NAMES_PER_BATCH,
-            error::BATCH_FULL
-        );
         for name in names {
             require!(batch.names.insert(name.clone()), error::DUPLICATE_NAME);
             batch.digest = fold_digest(batch.digest, &name);
             batch.count = batch.count.saturating_add(1);
+            batch.remaining = batch.remaining.saturating_add(1);
         }
         let digest = Base58CryptoHash::from(batch.digest);
         let count = batch.count;
@@ -92,21 +85,39 @@ impl RegistrarOpener {
     }
 
     pub fn discard_batch(&mut self, batch_id: u32) {
-        let caller = env::predecessor_account_id();
-        require!(
-            caller == self.operator || caller == self.admin,
-            error::ONLY_ADMIN_OR_OPERATOR
-        );
-        let revoking = caller == self.admin;
+        let revoking = self.assert_admin_or_operator() == self.admin;
         let batch = self.batch_mut(batch_id);
-        let spent = batch.names.is_empty();
+        let spent = batch.remaining == 0;
         require!(revoking || spent || !batch.approved, error::BATCH_LIVE);
-        batch.names.clear();
         self.batches.remove(&batch_id);
         emit(
             "batch_discarded",
             serde_json::json!({"batch_id": batch_id, "revoked": revoking}),
         );
+    }
+
+    pub fn forget_names(&mut self, batch_id: u32, names: Vec<AccountId>) -> u32 {
+        self.assert_admin_or_operator();
+        require!(!names.is_empty(), error::EMPTY_NAMES);
+        require!(names.len() <= MAX_NAMES_PER_ADD, error::TOO_MANY_NAMES);
+        require!(batch_id < self.next_batch_id, error::NO_BATCH);
+        require!(
+            !self.batches.contains_key(&batch_id),
+            error::BATCH_NOT_DISCARDED
+        );
+        let mut stranded: LookupSet<AccountId> =
+            LookupSet::new(StorageKey::BatchNames { batch_id });
+        let mut freed = 0u32;
+        for name in &names {
+            if stranded.remove(name) {
+                freed = freed.saturating_add(1);
+            }
+        }
+        emit(
+            "names_forgotten",
+            serde_json::json!({"batch_id": batch_id, "freed": freed}),
+        );
+        freed
     }
 
     #[payable]
@@ -128,6 +139,7 @@ impl RegistrarOpener {
         );
         for name in &names {
             require!(batch.names.remove(name), error::NOT_IN_BATCH);
+            batch.remaining = batch.remaining.saturating_sub(1);
         }
         for name in &names {
             emit(
@@ -161,7 +173,9 @@ impl RegistrarOpener {
         self.failed = self.failed.saturating_add(1);
         if let (Some(batch_id), Some(name)) = (batch_id, name.clone()) {
             if let Some(batch) = self.batches.get_mut(&batch_id) {
-                batch.names.insert(name);
+                if batch.names.insert(name) {
+                    batch.remaining = batch.remaining.saturating_add(1);
+                }
             }
         }
         emit(
