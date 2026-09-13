@@ -1,17 +1,19 @@
+use near_sdk::json_types::Base58CryptoHash;
 use near_sdk::test_utils::VMContextBuilder;
 use near_sdk::{
-    test_vm_config, testing_env, AccountId, Gas, NearToken, PromiseResult, PublicKey,
+    test_vm_config, testing_env, AccountId, CryptoHash, Gas, NearToken, PromiseResult, PublicKey,
     RuntimeFeesConfig,
 };
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::batch::{MAX_LIVE_BATCHES, MAX_NAMES_PER_ADD, MAX_NAMES_PER_BATCH};
 
 const NOTHING: NearToken = NearToken::from_yoctonear(0);
 const YOCTO: NearToken = NearToken::from_yoctonear(1);
 const FUNDING: NearToken = NearToken::from_millinear(20);
 const NOW: u64 = 1_000_000;
-const DELAY: u64 = MAINNET_UPGRADE_DELAY_NS;
+const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v1";
 
 fn here() -> AccountId {
     "registrar".parse().unwrap()
@@ -72,7 +74,7 @@ fn as_callback(result: PromiseResult) {
 
 fn installed() -> RegistrarOpener {
     as_account(here(), NOTHING);
-    RegistrarOpener::new(admin(), operator(), U64(DELAY))
+    RegistrarOpener::new(admin(), operator())
 }
 
 fn names(raw: &[&str]) -> Vec<AccountId> {
@@ -108,14 +110,14 @@ fn approved(contract: &mut RegistrarOpener, raw: &[&str]) -> u32 {
 }
 
 #[test]
-fn install_sets_both_roles_and_starts_at_epoch_zero() {
+fn install_sets_both_roles_and_no_batches() {
     let contract = installed();
     let view = contract.opener_view();
     assert_eq!(view.admin, admin());
     assert_eq!(view.operator, operator());
-    assert_eq!(view.operator_epoch, 0);
+    assert_eq!(view.live_batches, 0);
     assert_eq!(view.state_version, STATE_VERSION);
-    assert!(view.pending_code.is_none());
+    assert_eq!(view.next_batch_id, 0);
     assert!(view.pending_admin.is_none());
 }
 
@@ -123,21 +125,21 @@ fn install_sets_both_roles_and_starts_at_epoch_zero() {
 #[should_panic(expected = "only this account may call this")]
 fn a_stranger_cannot_install_the_opener() {
     as_account(stranger(), NOTHING);
-    RegistrarOpener::new(admin(), operator(), U64(DELAY));
+    RegistrarOpener::new(admin(), operator());
 }
 
 #[test]
 #[should_panic(expected = "admin and operator must be different accounts")]
 fn the_two_roles_cannot_be_the_same_account() {
     as_account(here(), NOTHING);
-    RegistrarOpener::new(admin(), admin(), U64(DELAY));
+    RegistrarOpener::new(admin(), admin());
 }
 
 #[test]
 #[should_panic(expected = "neither role may be this account")]
 fn neither_role_may_be_the_registrar_itself() {
     as_account(here(), NOTHING);
-    RegistrarOpener::new(here(), operator(), U64(DELAY));
+    RegistrarOpener::new(here(), operator());
 }
 
 #[test]
@@ -146,26 +148,11 @@ fn a_second_install_cannot_rename_the_admin() {
     let contract = installed();
     env::state_write(&contract);
     as_account(here(), NOTHING);
-    RegistrarOpener::new(stranger(), operator(), U64(DELAY));
+    RegistrarOpener::new(stranger(), operator());
 }
 
 #[test]
-#[should_panic(expected = "the upgrade delay must be greater than zero")]
-fn an_instant_upgrade_path_cannot_be_configured_at_install() {
-    as_account(here(), NOTHING);
-    RegistrarOpener::new(admin(), operator(), U64(0));
-}
-
-#[test]
-fn the_view_publishes_both_the_configured_delay_and_the_mainnet_one() {
-    let contract = installed();
-    let view = contract.opener_view();
-    assert_eq!(view.upgrade_delay_ns.0, DELAY);
-    assert_eq!(view.mainnet_upgrade_delay_ns.0, MAINNET_UPGRADE_DELAY_NS);
-}
-
-#[test]
-fn a_new_batch_is_empty_unapproved_and_on_the_current_epoch() {
+fn a_new_batch_starts_empty_and_unapproved() {
     let mut contract = installed();
     as_account(operator(), NOTHING);
     let batch_id = contract.create_batch(owner_key(), FUNDING);
@@ -173,8 +160,6 @@ fn a_new_batch_is_empty_unapproved_and_on_the_current_epoch() {
     assert_eq!(batch.count, 0);
     assert_eq!(batch.remaining, 0);
     assert!(!batch.approved);
-    assert!(!batch.stale);
-    assert_eq!(batch.operator, operator());
     assert_eq!(batch.funding, FUNDING);
 }
 
@@ -379,28 +364,27 @@ fn a_batch_cannot_be_approved_twice() {
 }
 
 #[test]
-fn replacing_the_operator_bumps_the_epoch_and_strands_an_approved_batch() {
+fn replacing_the_operator_locks_the_old_one_out_and_leaves_the_batch_openable() {
     let mut contract = installed();
     let batch_id = approved(&mut contract, &["aaa"]);
     as_account(admin(), YOCTO);
     contract.change_operator(next_operator());
-    let view = contract.opener_view();
-    assert_eq!(view.operator, next_operator());
-    assert_eq!(view.operator_epoch, 1);
-    let batch = contract.get_batch(batch_id).unwrap();
-    assert!(batch.approved);
-    assert!(batch.stale);
+    assert_eq!(contract.opener_view().operator, next_operator());
+
+    as_account(next_operator(), FUNDING);
+    assert_eq!(contract.open_names(batch_id, names(&["aaa"])), 1);
+    assert_eq!(contract.get_batch(batch_id).unwrap().remaining, 0);
 }
 
 #[test]
-#[should_panic(expected = "the batch belongs to a replaced operator")]
-fn a_stranded_batch_cannot_be_opened_by_the_new_operator() {
+fn the_new_operator_can_discard_what_the_old_one_left_behind() {
     let mut contract = installed();
-    let batch_id = approved(&mut contract, &["aaa"]);
+    let batch_id = drafted(&mut contract, &["aaa"]);
     as_account(admin(), YOCTO);
     contract.change_operator(next_operator());
-    as_account(next_operator(), FUNDING);
-    contract.open_names(batch_id, names(&["aaa"]));
+    as_account(next_operator(), NOTHING);
+    contract.discard_batch(batch_id);
+    assert!(contract.get_batch(batch_id).is_none());
 }
 
 #[test]
@@ -411,17 +395,6 @@ fn the_replaced_operator_loses_every_operator_method() {
     contract.change_operator(next_operator());
     as_account(operator(), NOTHING);
     contract.create_batch(owner_key(), FUNDING);
-}
-
-#[test]
-fn a_stranded_batch_can_be_discarded_to_reclaim_its_storage() {
-    let mut contract = installed();
-    let batch_id = approved(&mut contract, &["aaa"]);
-    as_account(admin(), YOCTO);
-    contract.change_operator(next_operator());
-    as_account(next_operator(), NOTHING);
-    contract.discard_batch(batch_id);
-    assert!(contract.get_batch(batch_id).is_none());
 }
 
 #[test]
@@ -602,7 +575,7 @@ fn a_failed_open_puts_the_name_back_in_the_batch() {
     contract.open_names(batch_id, names(&["aaa"]));
     assert_eq!(contract.get_batch(batch_id).unwrap().remaining, 0);
     as_callback(PromiseResult::Failed);
-    let handled = contract.on_name_opened(Some(batch_id), 0, Some("aaa".parse().unwrap()));
+    let handled = contract.on_name_opened(Some(batch_id), Some("aaa".parse().unwrap()));
     assert!(!handled);
     let batch = contract.get_batch(batch_id).unwrap();
     assert_eq!(batch.remaining, 1);
@@ -610,7 +583,7 @@ fn a_failed_open_puts_the_name_back_in_the_batch() {
 }
 
 #[test]
-fn a_failure_reported_against_a_replaced_operator_does_not_reopen_the_slot() {
+fn a_failure_after_the_operator_changed_still_returns_the_slot() {
     let mut contract = installed();
     let batch_id = approved(&mut contract, &["aaa"]);
     as_account(operator(), FUNDING);
@@ -618,8 +591,12 @@ fn a_failure_reported_against_a_replaced_operator_does_not_reopen_the_slot() {
     as_account(admin(), YOCTO);
     contract.change_operator(next_operator());
     as_callback(PromiseResult::Failed);
-    contract.on_name_opened(Some(batch_id), 0, Some("aaa".parse().unwrap()));
-    assert_eq!(contract.get_batch(batch_id).unwrap().remaining, 0);
+    contract.on_name_opened(Some(batch_id), Some("aaa".parse().unwrap()));
+    assert_eq!(
+        contract.get_batch(batch_id).unwrap().remaining,
+        1,
+        "the council approved this name, a new operator should still be able to open it"
+    );
 }
 
 #[test]
@@ -629,7 +606,7 @@ fn a_successful_open_is_counted() {
     as_account(operator(), FUNDING);
     contract.open_names(batch_id, names(&["aaa"]));
     as_callback(PromiseResult::Successful(Vec::new()));
-    assert!(contract.on_name_opened(Some(batch_id), 0, Some("aaa".parse().unwrap())));
+    assert!(contract.on_name_opened(Some(batch_id), Some("aaa".parse().unwrap())));
     assert_eq!(contract.opener_view().opened, 1);
     assert_eq!(contract.get_batch(batch_id).unwrap().remaining, 0);
 }
@@ -655,68 +632,35 @@ fn the_single_create_path_refuses_dust() {
 }
 
 #[test]
-fn approving_code_records_the_hash_and_the_earliest_moment_it_can_land() {
+#[should_panic(expected = "only the admin may call this")]
+fn the_operator_cannot_upgrade_the_contract() {
     let mut contract = installed();
-    as_account(admin(), YOCTO);
-    contract.approve_code(Base58CryptoHash::from(CryptoHash::default()));
-    let pending = contract.opener_view().pending_code.unwrap();
-    assert_eq!(pending.earliest_at_ns.0, NOW + DELAY);
+    as_account(operator(), YOCTO);
+    contract.upgrade(vec![0u8, 1, 2, 3].into()).detach();
 }
 
 #[test]
-#[should_panic(expected = "the approval delay has not elapsed")]
-fn an_upgrade_inside_the_delay_is_refused() {
+#[should_panic(expected = "only the admin may call this")]
+fn a_stranger_cannot_upgrade_the_contract() {
     let mut contract = installed();
-    let code = vec![0u8, 1, 2, 3];
-    let hash = Base58CryptoHash::from(to_hash(env::sha256(&code)));
-    as_account(admin(), YOCTO);
-    contract.approve_code(hash);
+    as_account(stranger(), YOCTO);
+    contract.upgrade(vec![0u8, 1, 2, 3].into()).detach();
+}
+
+#[test]
+#[should_panic(expected = "exactly one yoctoNEAR must be attached")]
+fn an_upgrade_without_one_yocto_is_refused() {
+    let mut contract = installed();
     as_account(admin(), NOTHING);
-    contract.upgrade(code.into()).detach();
+    contract.upgrade(vec![0u8, 1, 2, 3].into()).detach();
 }
 
 #[test]
-#[should_panic(expected = "this code does not match the approved hash")]
-fn code_that_does_not_match_the_approved_hash_is_refused() {
+#[should_panic(expected = "the deploy did not land")]
+fn a_deploy_that_fails_is_reported_rather_than_passing_quietly() {
     let mut contract = installed();
-    let approved_code = vec![0u8, 1, 2, 3];
-    let hash = Base58CryptoHash::from(to_hash(env::sha256(&approved_code)));
-    as_account(admin(), YOCTO);
-    contract.approve_code(hash);
-    testing_env!(context(admin(), NOTHING)
-        .block_timestamp(NOW + DELAY)
-        .build());
-    contract.upgrade(vec![9u8, 9, 9].into()).detach();
-}
-
-#[test]
-#[should_panic(expected = "no code hash has been approved")]
-fn a_canceled_approval_cannot_be_upgraded_against() {
-    let mut contract = installed();
-    let code = vec![0u8, 1, 2, 3];
-    let hash = Base58CryptoHash::from(to_hash(env::sha256(&code)));
-    as_account(admin(), YOCTO);
-    contract.approve_code(hash);
-    as_account(admin(), YOCTO);
-    contract.cancel_code();
-    testing_env!(context(admin(), NOTHING)
-        .block_timestamp(NOW + DELAY)
-        .build());
-    contract.upgrade(code.into()).detach();
-}
-
-#[test]
-#[should_panic(expected = "only the admin or the operator may call this")]
-fn a_stranger_cannot_execute_an_approved_upgrade() {
-    let mut contract = installed();
-    let code = vec![0u8, 1, 2, 3];
-    let hash = Base58CryptoHash::from(to_hash(env::sha256(&code)));
-    as_account(admin(), YOCTO);
-    contract.approve_code(hash);
-    testing_env!(context(stranger(), NOTHING)
-        .block_timestamp(NOW + DELAY)
-        .build());
-    contract.upgrade(code.into()).detach();
+    as_callback(PromiseResult::Failed);
+    contract.on_upgraded(Base58CryptoHash::from(CryptoHash::default()));
 }
 
 #[test]

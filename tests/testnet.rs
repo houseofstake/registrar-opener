@@ -6,7 +6,6 @@ use near_workspaces::{Contract, Worker};
 use serde_json::json;
 
 const RPC: &str = "https://test.rpc.fastnear.com";
-const REHEARSAL_DELAY_NS: u64 = 2_000_000_000;
 
 fn fixture(name: &str) -> Result<Vec<u8>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -81,7 +80,6 @@ async fn the_multisig_installs_the_opener_over_itself_on_live_testnet() -> Resul
     let init = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&json!({
         "admin": council.id(),
         "operator": operator.id(),
-        "upgrade_delay_ns": REHEARSAL_DELAY_NS.to_string(),
     }))?);
 
     let request_id: u32 = alice

@@ -10,7 +10,6 @@ const FUNDING: NearToken = NearToken::from_millinear(10);
 const YOCTO: NearToken = NearToken::from_yoctonear(1);
 const DAO_ACCOUNT: &str = "hos-root.sputnik-dao.near";
 const COUNCIL_THRESHOLD: usize = 3;
-const SANDBOX_DELAY_NS: u64 = 2_000_000_000;
 const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v1";
 
 struct Fleet {
@@ -251,7 +250,6 @@ async fn install_opener(dao: &Contract, registrar: &Contract, operator: &Account
         .args_json(json!({
             "admin": dao.id(),
             "operator": operator.id(),
-            "upgrade_delay_ns": SANDBOX_DELAY_NS.to_string(),
         }))
         .max_gas()
         .transact()
@@ -431,7 +429,6 @@ async fn the_multisig_installs_the_opener_over_itself_in_one_request() -> Result
     let init = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&json!({
         "admin": council.id(),
         "operator": operator.id(),
-        "upgrade_delay_ns": SANDBOX_DELAY_NS.to_string(),
     }))?);
     let request_id: u32 = alice
         .call(registrar.id(), "add_request_and_confirm")
@@ -571,7 +568,6 @@ async fn the_multisig_installs_the_opener_from_mainnets_own_state_at_its_own_thr
     let init = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&json!({
         "admin": council.id(),
         "operator": operator.id(),
-        "upgrade_delay_ns": SANDBOX_DELAY_NS.to_string(),
     }))?);
     let request_id: u32 = holders[0]
         .call("add_request_and_confirm")
@@ -672,7 +668,6 @@ async fn the_opener_installs_over_mainnets_own_stored_state() -> Result<()> {
                 .args_json(json!({
                     "admin": dao.id(),
                     "operator": operator.id(),
-                    "upgrade_delay_ns": SANDBOX_DELAY_NS.to_string(),
                 }))
                 .gas(Gas::from_tgas(50)),
         )
@@ -826,7 +821,7 @@ async fn a_name_outside_the_approved_batch_cannot_be_opened() -> Result<()> {
 }
 
 #[tokio::test]
-async fn replacing_the_operator_strands_an_approved_batch() -> Result<()> {
+async fn replacing_the_operator_locks_the_old_one_out_at_once() -> Result<()> {
     let fleet = setup().await?;
     let batch_id = draft(&fleet, &["alpha"]).await?;
     approve(&fleet, batch_id).await?;
@@ -842,10 +837,18 @@ async fn replacing_the_operator_strands_an_approved_batch() -> Result<()> {
 
     let view: serde_json::Value = fleet.registrar.view("opener_view").await?.json()?;
     assert_eq!(view["operator"], fleet.stranger.id().as_str());
-    assert_eq!(view["operator_epoch"], 1);
-    assert_eq!(batch_view(&fleet, batch_id).await?["stale"], true);
 
-    let outcome = fleet
+    let locked_out = open(&fleet, batch_id, &["alpha"], Gas::from_tgas(300)).await?;
+    assert!(
+        locked_out.is_failure(),
+        "the replaced operator could still open: {locked_out:#?}"
+    );
+    assert!(
+        fleet.worker.view_account(&"alpha".parse()?).await.is_err(),
+        "the replaced operator opened a name"
+    );
+
+    let taken_over = fleet
         .stranger
         .call(fleet.registrar.id(), "open_names")
         .args_json(json!({ "batch_id": batch_id, "names": ["alpha"] }))
@@ -854,9 +857,10 @@ async fn replacing_the_operator_strands_an_approved_batch() -> Result<()> {
         .transact()
         .await?;
     assert!(
-        outcome.is_failure(),
-        "a replaced operator's approved batch was still openable"
+        taken_over.is_success(),
+        "the new operator could not finish a batch the council approved: {taken_over:#?}"
     );
+    assert_opened(&fleet, "alpha").await?;
     Ok(())
 }
 
@@ -958,49 +962,39 @@ async fn the_admin_can_open_one_name_outside_any_batch() -> Result<()> {
 }
 
 #[tokio::test]
-async fn an_upgrade_lands_only_after_the_delay_and_carries_the_state_across() -> Result<()> {
+async fn a_dao_upgrade_lands_and_carries_the_state_across() -> Result<()> {
     let fleet = setup().await?;
     let batch_id = draft(&fleet, &["alpha"]).await?;
     approve(&fleet, batch_id).await?;
 
     let code = ours_wasm()?;
-    let hash = bs58::encode(Sha256::digest(&code)).into_string();
+    let operator_tried = fleet
+        .operator
+        .call(fleet.registrar.id(), "upgrade")
+        .args_json(json!({
+            "code": base64::engine::general_purpose::STANDARD.encode(&code),
+        }))
+        .deposit(YOCTO)
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        operator_tried.is_failure(),
+        "the operator could deploy code to registrar: {operator_tried:#?}"
+    );
+
     dao_calls(
         &fleet,
-        "approve_code",
-        json!({ "code_hash": hash }),
+        "upgrade",
+        json!({ "code": base64::engine::general_purpose::STANDARD.encode(&code) }),
         YOCTO,
         COUNCIL_THRESHOLD,
     )
     .await?;
 
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&code);
-    let early = fleet
-        .operator
-        .call(fleet.registrar.id(), "upgrade")
-        .args_json(json!({ "code": encoded }))
-        .max_gas()
-        .transact()
-        .await?;
-    assert!(
-        early.is_failure(),
-        "the upgrade landed inside the approval delay"
-    );
-
-    fleet.worker.fast_forward(10).await?;
-
-    let late = fleet
-        .operator
-        .call(fleet.registrar.id(), "upgrade")
-        .args_json(json!({ "code": encoded }))
-        .max_gas()
-        .transact()
-        .await?;
-    assert!(late.is_success(), "the upgrade failed: {late:#?}");
-
     let view: serde_json::Value = fleet.registrar.view("opener_view").await?.json()?;
     assert_eq!(view["operator"], fleet.operator.id().as_str());
-    assert!(view["pending_code"].is_null(), "the approval was not spent");
+    assert_eq!(view["state_version"], 1);
     let batch = batch_view(&fleet, batch_id).await?;
     assert_eq!(batch["approved"], true, "the batch did not survive migrate");
     assert_eq!(batch["remaining"], 1);
@@ -1068,62 +1062,34 @@ async fn discarding_a_stranded_batch_gives_back_every_byte_it_took() -> Result<(
 }
 
 #[tokio::test]
-async fn a_failed_upgrade_leaves_the_approval_standing_for_a_retry() -> Result<()> {
+async fn a_deploy_that_does_not_land_leaves_the_contract_working() -> Result<()> {
     let fleet = setup().await?;
+    let batch_id = draft(&fleet, &["alpha"]).await?;
+    approve(&fleet, batch_id).await?;
+
     let junk = b"this is not a wasm module".to_vec();
-    let hash = bs58::encode(Sha256::digest(&junk)).into_string();
     dao_calls(
         &fleet,
-        "approve_code",
-        json!({ "code_hash": hash }),
+        "upgrade",
+        json!({ "code": base64::engine::general_purpose::STANDARD.encode(&junk) }),
         YOCTO,
         COUNCIL_THRESHOLD,
     )
     .await?;
-    fleet.worker.fast_forward(10).await?;
-
-    let attempt = fleet
-        .operator
-        .call(fleet.registrar.id(), "upgrade")
-        .args_json(json!({
-            "code": base64::engine::general_purpose::STANDARD.encode(&junk),
-        }))
-        .max_gas()
-        .transact()
-        .await?;
-    assert!(attempt.is_failure(), "invalid code deployed: {attempt:#?}");
-    assert!(
-        format!("{attempt:#?}").contains("the approval still stands"),
-        "the caller was not told the deploy failed: {attempt:#?}"
-    );
 
     let view: serde_json::Value = fleet.registrar.view("opener_view").await?.json()?;
     assert_eq!(
-        view["pending_code"]["code_hash"], hash,
-        "a failed deploy burned the council's approval"
+        view["operator"],
+        fleet.operator.id().as_str(),
+        "the contract stopped answering after a failed deploy: {view}"
     );
+    let batch = batch_view(&fleet, batch_id).await?;
+    assert_eq!(batch["remaining"], 1, "the batch was disturbed");
 
-    let code = ours_wasm()?;
-    let good = bs58::encode(Sha256::digest(&code)).into_string();
-    dao_calls(
-        &fleet,
-        "approve_code",
-        json!({ "code_hash": good }),
-        YOCTO,
-        COUNCIL_THRESHOLD,
-    )
-    .await?;
-    fleet.worker.fast_forward(10).await?;
-    let retry = fleet
-        .operator
-        .call(fleet.registrar.id(), "upgrade")
-        .args_json(json!({
-            "code": base64::engine::general_purpose::STANDARD.encode(&code),
-        }))
-        .max_gas()
-        .transact()
-        .await?;
-    assert!(retry.is_success(), "the retry failed: {retry:#?}");
+    open(&fleet, batch_id, &["alpha"], Gas::from_tgas(300))
+        .await?
+        .into_result()?;
+    assert_opened(&fleet, "alpha").await?;
     Ok(())
 }
 

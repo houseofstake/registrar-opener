@@ -63,17 +63,19 @@ receipt, so either all three land or none do and there is no half opened account
 
 ## Revoking
 
-Two mechanisms, because they answer different failures.
+`change_operator` locks the old operator out immediately, because every operator method compares
+the caller against the one stored in state. A replaced key cannot draft, open or discard anything
+from the moment the call lands. That is the answer to a compromised operator.
 
-`change_operator` bumps an epoch, and every batch, drafted or approved, is pinned to the epoch it
-was built under. So replacing a compromised operator strands every one of their batches in the
-same transaction, with no separate revoke call. That is the blunt instrument for a lost key.
+Batches survive the change on purpose. The council approved their contents by digest, so the
+names and the key are what was voted on regardless of who drafted them, and the incoming operator
+can either finish them or discard them.
 
-The admin can also discard any single batch, which is the council withdrawing an approval it
-already gave. The operator cannot: they may only discard a draft, a batch stranded by an epoch
-bump, or one whose names have all been opened. That asymmetry matters in a case that needs no
-attacker at all. If the same name sits in two approved batches and is opened from the first, the
-second can never drain, so without the admin path it would hold one of the four slots forever.
+The admin can discard any batch, which is the council withdrawing an approval it already gave. The
+operator can only discard a draft or a batch whose names have all been opened. That asymmetry
+matters in a case that needs no attacker at all. If the same name sits in two approved batches and
+is opened from the first, the second can never drain, so without the admin path it would hold one
+of the four slots forever.
 
 The worst a compromised operator can do is open names the council already approved, to the key the
 council already saw.
@@ -85,23 +87,17 @@ version would leave `registrar` with no governance at all.
 
 ## Upgrades
 
-`approve_code(hash)` records a code hash and the earliest moment it can land. After the delay,
-`upgrade(code)` checks the code against the hash, deploys it and chains `migrate`. The delay is
-set at install and cannot be zero.
+`upgrade(code)` is admin only. It deploys the code and chains `migrate` in the same receipt, and a
+callback panics if the deploy did not land so a bad attempt reports as a failed transaction rather
+than a quiet no-op.
 
-The approval is spent in a callback, not when the upgrade is launched, so a deploy that does not
-land leaves the approval standing and the operator can retry without another 48 hour wait. The
-callback panics when the deploy failed, so a bad attempt reports as a failed transaction rather
-than a quiet no-op. Redeploying the same approved code is not a risk, it is the same bytes the
-council already read.
+There is no timelock, deliberately. A delay only buys anything if somebody is watching and can
+cancel inside it, which needs guardians and a notification system, and that is a whole stack to
+build and keep running. Without it a delay is ceremony. The real gate is that the admin is a
+3 of 5 DAO whose proposals are visible on chain.
 
-One consequence worth knowing: the callback runs against the new code. A future version that
-renames or removes `on_upgraded` would land its deploy and then report a failed callback, leaving
-the approval set. That fails in the safe direction but it is a thing to keep in mind when writing
-the next version.
-
-The mainnet value is 48 hours. `opener_view` publishes both the configured delay and that mainnet
-constant, so a deploy can be checked against it without reading the code.
+The method is admin only rather than admin or operator for the same reason: with nothing pre
+approved, whoever can call `upgrade` can put arbitrary code on `registrar`.
 
 ## How it gets onto registrar
 
@@ -177,9 +173,10 @@ and its real threshold of three. The contract goes onto an account named `regist
 runs through genuine DAO proposals: a batch is drafted, three of the five real members vote, and
 the operator opens genuine top level accounts.
 
-They also cover the refusals, the threshold stopping one vote short, the epoch strand, the admin
-revoke, the slot return, storage reclaim measured in bytes, an upgrade landing only after its
-delay with the batch state intact, a failed deploy leaving the approval standing, a registrar key
+They also cover the refusals, the threshold stopping one vote short, an operator replacement
+locking the old one out while the new one finishes the batch, the admin revoke, the slot return,
+storage reclaim measured in bytes, a DAO driven upgrade carrying the batch state across, a failed
+deploy leaving the contract working, the operator being refused an upgrade, a registrar key
 failing to forge a callback, and both install routes against mainnet's replayed state.
 
 Lint is two passes, because the sandbox dev dependencies cannot build for wasm:
@@ -276,11 +273,9 @@ faucet, deploys the real mainnet multisig onto one of them, brings it up as a 2 
 installs this contract through a multisig request, which is the sequence that would be run on
 mainnet.
 
-Run twice on 2026-09-12, both clean. The second landed on
-`dev-20260912183400-31014144628914.testnet`. Verified independently over RPC rather than from the
-test's own assertions: `code_hash` came back
-`8DDxNfEw7KiN8gpVazUgYNCrRMqsL33GRbJv9YpbF9ta`, matching the build exactly, `opener_view`
-answered with the right admin, operator and a `mainnet_upgrade_delay_ns` of 172800000000000, and
+Run twice on 2026-09-12, both clean, against the shape the contract had that day. Verified
+independently over RPC rather than from the test's own assertions: the installed `code_hash`
+matched the build exactly, `opener_view` answered with the right admin and operator, and
 `get_members` returned `MethodResolveError(MethodNotFound)`.
 
 ## Status
