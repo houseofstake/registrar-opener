@@ -34,6 +34,10 @@ impl RegistrarOpener {
     pub fn change_operator(&mut self, operator: AccountId) {
         self.assert_admin();
         require!(operator != self.admin, error::ADMIN_IS_OPERATOR);
+        require!(
+            self.pending_admin.as_ref() != Some(&operator),
+            error::NOMINEE_IS_OPERATOR
+        );
         require!(operator != env::current_account_id(), error::ROLE_IS_SELF);
         self.operator = operator.clone();
         emit(
@@ -62,9 +66,23 @@ impl RegistrarOpener {
             env::predecessor_account_id() == nominee,
             error::ONLY_PENDING_ADMIN
         );
+        require!(nominee != self.operator, error::NOMINEE_IS_OPERATOR);
         self.admin = nominee.clone();
         self.pending_admin = None;
         emit("admin_changed", serde_json::json!({"admin": nominee}));
+    }
+
+    #[payable]
+    pub fn cancel_nomination(&mut self) {
+        self.assert_admin();
+        let nominee = self
+            .pending_admin
+            .take()
+            .unwrap_or_else(|| env::panic_str(error::NO_PENDING_ADMIN));
+        emit(
+            "nomination_cancelled",
+            serde_json::json!({"admin": nominee}),
+        );
     }
 
     #[payable]

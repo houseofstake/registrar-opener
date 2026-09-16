@@ -112,6 +112,11 @@ impl RegistrarOpener {
     }
 
     fn assert_operator(&self) {
+        assert_one_yocto();
+        self.assert_operator_account();
+    }
+
+    fn assert_operator_account(&self) {
         require!(
             env::predecessor_account_id() == self.operator,
             error::ONLY_OPERATOR
@@ -119,6 +124,7 @@ impl RegistrarOpener {
     }
 
     fn assert_admin_or_operator(&self) -> AccountId {
+        assert_one_yocto();
         let caller = env::predecessor_account_id();
         require!(
             caller == self.operator || caller == self.admin,

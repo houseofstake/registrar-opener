@@ -5,6 +5,7 @@ pub const ONLY_SELF: &str = "only this account may call this";
 pub const ONLY_PENDING_ADMIN: &str = "only the nominated admin may accept";
 pub const NO_PENDING_ADMIN: &str = "no admin has been nominated";
 pub const ADMIN_IS_OPERATOR: &str = "admin and operator must be different accounts";
+pub const NOMINEE_IS_OPERATOR: &str = "the nominated admin is the operator, the roles would merge";
 pub const ROLE_IS_SELF: &str = "neither role may be this account";
 pub const ALREADY_INSTALLED: &str = "this account already runs the opener";
 pub const NO_STATE: &str = "there is no state to migrate";

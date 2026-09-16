@@ -286,6 +286,7 @@ async fn draft(fleet: &Fleet, names: &[&str]) -> Result<u32> {
         .operator
         .call(fleet.registrar.id(), "create_batch")
         .args_json(json!({ "owner_key": fleet.owner_key, "funding": FUNDING }))
+        .deposit(YOCTO)
         .max_gas()
         .transact()
         .await?
@@ -294,6 +295,7 @@ async fn draft(fleet: &Fleet, names: &[&str]) -> Result<u32> {
         .operator
         .call(fleet.registrar.id(), "add_names")
         .args_json(json!({ "batch_id": batch_id, "names": names }))
+        .deposit(YOCTO)
         .max_gas()
         .transact()
         .await?
@@ -902,6 +904,7 @@ async fn a_full_add_names_call_fits_and_the_digest_still_matches() -> Result<()>
         .operator
         .call(fleet.registrar.id(), "create_batch")
         .args_json(json!({ "owner_key": fleet.owner_key, "funding": FUNDING }))
+        .deposit(YOCTO)
         .max_gas()
         .transact()
         .await?
@@ -910,6 +913,7 @@ async fn a_full_add_names_call_fits_and_the_digest_still_matches() -> Result<()>
         .operator
         .call(fleet.registrar.id(), "add_names")
         .args_json(json!({ "batch_id": batch_id, "names": borrowed }))
+        .deposit(YOCTO)
         .max_gas()
         .transact()
         .await?;
@@ -1062,6 +1066,7 @@ async fn forgetting_a_dead_batch_gives_back_every_byte_it_stranded() -> Result<(
         .operator
         .call(fleet.registrar.id(), "create_batch")
         .args_json(json!({ "owner_key": fleet.owner_key, "funding": FUNDING }))
+        .deposit(YOCTO)
         .max_gas()
         .transact()
         .await?
@@ -1071,6 +1076,7 @@ async fn forgetting_a_dead_batch_gives_back_every_byte_it_stranded() -> Result<(
             .operator
             .call(fleet.registrar.id(), "add_names")
             .args_json(json!({ "batch_id": batch_id, "names": chunk }))
+            .deposit(YOCTO)
             .max_gas()
             .transact()
             .await?
@@ -1085,6 +1091,7 @@ async fn forgetting_a_dead_batch_gives_back_every_byte_it_stranded() -> Result<(
         .operator
         .call(fleet.registrar.id(), "discard_batch")
         .args_json(json!({ "batch_id": batch_id }))
+        .deposit(YOCTO)
         .max_gas()
         .transact()
         .await?
@@ -1100,6 +1107,7 @@ async fn forgetting_a_dead_batch_gives_back_every_byte_it_stranded() -> Result<(
             .operator
             .call(fleet.registrar.id(), "forget_names")
             .args_json(json!({ "batch_id": batch_id, "names": chunk }))
+            .deposit(YOCTO)
             .max_gas()
             .transact()
             .await?
@@ -1125,6 +1133,7 @@ async fn a_batch_id_is_never_reissued_so_stranded_names_cannot_be_inherited() ->
         .operator
         .call(fleet.registrar.id(), "discard_batch")
         .args_json(json!({ "batch_id": first }))
+        .deposit(YOCTO)
         .max_gas()
         .transact()
         .await?
@@ -1177,6 +1186,7 @@ async fn discarding_a_stranded_batch_is_one_call_whatever_it_holds() -> Result<(
         .stranger
         .call(fleet.registrar.id(), "discard_batch")
         .args_json(json!({ "batch_id": batch_id }))
+        .deposit(YOCTO)
         .max_gas()
         .transact()
         .await?;
@@ -1240,8 +1250,6 @@ async fn a_stranger_cannot_drive_any_privileged_method() -> Result<()> {
     let fleet = setup().await?;
     let batch_id = draft(&fleet, &["alpha"]).await?;
     let digest = digest_of(&fleet, batch_id).await?;
-    let nothing = NearToken::from_yoctonear(0);
-
     let attempts: Vec<(&str, serde_json::Value, NearToken)> = vec![
         (
             "approve_batch",
@@ -1258,11 +1266,25 @@ async fn a_stranger_cannot_drive_any_privileged_method() -> Result<()> {
             json!({ "admin": fleet.stranger.id() }),
             YOCTO,
         ),
+        ("cancel_nomination", json!({}), YOCTO),
         (
             "create_batch",
             json!({ "owner_key": fleet.owner_key, "funding": FUNDING }),
-            nothing,
+            YOCTO,
         ),
+        (
+            "add_names",
+            json!({ "batch_id": batch_id, "names": ["smuggled"] }),
+            YOCTO,
+        ),
+        ("discard_batch", json!({ "batch_id": batch_id }), YOCTO),
+        (
+            "forget_names",
+            json!({ "batch_id": batch_id, "names": ["smuggled"] }),
+            YOCTO,
+        ),
+        ("accept_admin", json!({}), YOCTO),
+        ("upgrade", json!({ "code": "AA==" }), YOCTO),
         (
             "create_account",
             json!({ "name": "stolen", "owner_key": fleet.owner_key }),
@@ -1278,9 +1300,15 @@ async fn a_stranger_cannot_drive_any_privileged_method() -> Result<()> {
             .max_gas()
             .transact()
             .await?;
+        let report = format!("{outcome:#?}");
         assert!(
             outcome.is_failure(),
-            "a stranger reached {method}: {outcome:#?}"
+            "a stranger reached {method}: {report}"
+        );
+        assert!(
+            !report.contains("doesn't accept deposit"),
+            "{method} refused the deposit before running, so it is gated on a yocto it cannot \
+             be sent and no caller can ever reach it: {report}"
         );
     }
     Ok(())

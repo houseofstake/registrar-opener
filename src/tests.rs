@@ -95,7 +95,7 @@ fn expected_digest(owner_key: &PublicKey, funding: NearToken, added: &[&str]) ->
 }
 
 fn drafted(contract: &mut RegistrarOpener, raw: &[&str]) -> u32 {
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let batch_id = contract.create_batch(owner_key(), FUNDING);
     contract.add_names(batch_id, names(raw));
     batch_id
@@ -154,7 +154,7 @@ fn a_second_install_cannot_rename_the_admin() {
 #[test]
 fn a_new_batch_starts_empty_and_unapproved() {
     let mut contract = installed();
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let batch_id = contract.create_batch(owner_key(), FUNDING);
     let batch = contract.get_batch(batch_id).unwrap();
     assert_eq!(batch.count, 0);
@@ -178,7 +178,7 @@ fn the_digest_matches_an_independent_recomputation() {
 fn the_digest_is_the_same_whether_the_names_arrive_in_one_call_or_several() {
     let mut contract = installed();
     let one = drafted(&mut contract, &["aaa", "bbb", "ccc"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let many = contract.create_batch(owner_key(), FUNDING);
     contract.add_names(many, names(&["aaa"]));
     contract.add_names(many, names(&["bbb", "ccc"]));
@@ -191,7 +191,7 @@ fn the_digest_is_the_same_whether_the_names_arrive_in_one_call_or_several() {
 #[test]
 fn every_added_name_moves_the_digest() {
     let mut contract = installed();
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let batch_id = contract.create_batch(owner_key(), FUNDING);
     let seeded = contract.get_batch(batch_id).unwrap().digest;
     let after_one = contract.add_names(batch_id, names(&["aaa"]));
@@ -204,7 +204,7 @@ fn every_added_name_moves_the_digest() {
 fn the_owner_key_and_the_funding_are_both_bound_into_the_digest() {
     let mut contract = installed();
     let baseline = drafted(&mut contract, &["aaa"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let other_owner = contract.create_batch(other_key(), FUNDING);
     contract.add_names(other_owner, names(&["aaa"]));
     let other_funding = contract.create_batch(owner_key(), NearToken::from_millinear(30));
@@ -219,7 +219,7 @@ fn the_owner_key_and_the_funding_are_both_bound_into_the_digest() {
 fn the_same_name_cannot_be_added_twice_across_calls() {
     let mut contract = installed();
     let batch_id = drafted(&mut contract, &["aaa"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.add_names(batch_id, names(&["aaa"]));
 }
 
@@ -258,7 +258,7 @@ fn an_implicit_account_id_cannot_be_added_to_a_batch() {
 #[should_panic(expected = "discard a batch before drafting another")]
 fn the_operator_cannot_hoard_batches_against_the_accounts_storage() {
     let mut contract = installed();
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     for _ in 0..=MAX_LIVE_BATCHES {
         contract.create_batch(owner_key(), FUNDING);
     }
@@ -267,7 +267,7 @@ fn the_operator_cannot_hoard_batches_against_the_accounts_storage() {
 #[test]
 fn discarding_frees_a_slot_for_the_next_batch() {
     let mut contract = installed();
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let mut ids = Vec::new();
     for _ in 0..MAX_LIVE_BATCHES {
         ids.push(contract.create_batch(owner_key(), FUNDING));
@@ -281,7 +281,7 @@ fn discarding_frees_a_slot_for_the_next_batch() {
 #[should_panic(expected = "only the current operator may call this")]
 fn a_stranger_cannot_draft_a_batch() {
     let mut contract = installed();
-    as_account(stranger(), NOTHING);
+    as_account(stranger(), YOCTO);
     contract.create_batch(owner_key(), FUNDING);
 }
 
@@ -289,7 +289,7 @@ fn a_stranger_cannot_draft_a_batch() {
 #[should_panic(expected = "only the current operator may call this")]
 fn the_admin_cannot_draft_a_batch() {
     let mut contract = installed();
-    as_account(admin(), NOTHING);
+    as_account(admin(), YOCTO);
     contract.create_batch(owner_key(), FUNDING);
 }
 
@@ -317,7 +317,7 @@ fn approving_a_digest_that_is_not_the_batch_is_refused() {
 #[should_panic(expected = "the batch holds no names")]
 fn an_empty_batch_cannot_be_approved() {
     let mut contract = installed();
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let batch_id = contract.create_batch(owner_key(), FUNDING);
     let digest = contract.get_batch(batch_id).unwrap().digest;
     as_account(admin(), YOCTO);
@@ -345,11 +345,58 @@ fn approval_demands_one_yocto() {
 }
 
 #[test]
+#[should_panic(expected = "exactly one yoctoNEAR must be attached")]
+fn drafting_demands_one_yocto() {
+    let mut contract = installed();
+    as_account(operator(), NOTHING);
+    contract.create_batch(owner_key(), FUNDING);
+}
+
+#[test]
+#[should_panic(expected = "exactly one yoctoNEAR must be attached")]
+fn adding_names_demands_one_yocto() {
+    let mut contract = installed();
+    let batch_id = drafted(&mut contract, &["aaa"]);
+    as_account(operator(), NOTHING);
+    contract.add_names(batch_id, names(&["bbb"]));
+}
+
+#[test]
+#[should_panic(expected = "exactly one yoctoNEAR must be attached")]
+fn discarding_demands_one_yocto() {
+    let mut contract = installed();
+    let batch_id = drafted(&mut contract, &["aaa"]);
+    as_account(operator(), NOTHING);
+    contract.discard_batch(batch_id);
+}
+
+#[test]
+#[should_panic(expected = "exactly one yoctoNEAR must be attached")]
+fn forgetting_demands_one_yocto() {
+    let mut contract = installed();
+    let batch_id = drafted(&mut contract, &["aaa"]);
+    as_account(operator(), YOCTO);
+    contract.discard_batch(batch_id);
+    as_account(operator(), NOTHING);
+    contract.forget_names(batch_id, names(&["aaa"]));
+}
+
+#[test]
+#[should_panic(expected = "exactly one yoctoNEAR must be attached")]
+fn cancelling_a_nomination_demands_one_yocto() {
+    let mut contract = installed();
+    as_account(admin(), YOCTO);
+    contract.change_admin(stranger());
+    as_account(admin(), NOTHING);
+    contract.cancel_nomination();
+}
+
+#[test]
 #[should_panic(expected = "can no longer be edited")]
 fn names_cannot_be_added_after_approval() {
     let mut contract = installed();
     let batch_id = approved(&mut contract, &["aaa"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.add_names(batch_id, names(&["bbb"]));
 }
 
@@ -382,7 +429,7 @@ fn the_new_operator_can_discard_what_the_old_one_left_behind() {
     let batch_id = drafted(&mut contract, &["aaa"]);
     as_account(admin(), YOCTO);
     contract.change_operator(next_operator());
-    as_account(next_operator(), NOTHING);
+    as_account(next_operator(), YOCTO);
     contract.discard_batch(batch_id);
     assert!(contract.get_batch(batch_id).is_none());
 }
@@ -393,7 +440,7 @@ fn the_replaced_operator_loses_every_operator_method() {
     let mut contract = installed();
     as_account(admin(), YOCTO);
     contract.change_operator(next_operator());
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.create_batch(owner_key(), FUNDING);
 }
 
@@ -402,7 +449,7 @@ fn the_replaced_operator_loses_every_operator_method() {
 fn a_live_approved_batch_cannot_be_discarded() {
     let mut contract = installed();
     let batch_id = approved(&mut contract, &["aaa"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.discard_batch(batch_id);
 }
 
@@ -410,15 +457,15 @@ fn a_live_approved_batch_cannot_be_discarded() {
 fn the_admin_can_revoke_an_approved_batch_that_can_never_drain() {
     let mut contract = installed();
     let stuck = approved(&mut contract, &["aaa"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     for index in 1..MAX_LIVE_BATCHES {
         drafted(&mut contract, &[format!("bb{index}").as_str()]);
     }
-    as_account(admin(), NOTHING);
+    as_account(admin(), YOCTO);
     contract.discard_batch(stuck);
     assert!(contract.get_batch(stuck).is_none());
 
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let next = contract.create_batch(owner_key(), FUNDING);
     assert!(
         contract.get_batch(next).is_some(),
@@ -433,7 +480,7 @@ fn the_operator_cannot_discard_a_batch_the_council_approved() {
     let batch_id = approved(&mut contract, &["aaa", "bbb"]);
     as_account(operator(), FUNDING);
     contract.open_names(batch_id, names(&["aaa"]));
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.discard_batch(batch_id);
 }
 
@@ -441,7 +488,7 @@ fn the_operator_cannot_discard_a_batch_the_council_approved() {
 fn a_discarded_batch_id_is_never_reissued_to_a_later_batch() {
     let mut contract = installed();
     let first = drafted(&mut contract, &["aaa"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.discard_batch(first);
     let second = drafted(&mut contract, &["bbb"]);
     assert_ne!(
@@ -458,7 +505,7 @@ fn a_discarded_batch_id_is_never_reissued_to_a_later_batch() {
 fn forgetting_frees_the_names_a_discarded_batch_stranded() {
     let mut contract = installed();
     let batch_id = drafted(&mut contract, &["aaa", "bbb"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.discard_batch(batch_id);
     assert_eq!(contract.forget_names(batch_id, names(&["aaa", "bbb"])), 2);
     assert_eq!(
@@ -473,7 +520,7 @@ fn forgetting_frees_the_names_a_discarded_batch_stranded() {
 fn a_live_batch_cannot_have_its_names_forgotten() {
     let mut contract = installed();
     let batch_id = drafted(&mut contract, &["aaa"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.forget_names(batch_id, names(&["aaa"]));
 }
 
@@ -481,7 +528,7 @@ fn a_live_batch_cannot_have_its_names_forgotten() {
 #[should_panic(expected = "no batch with that id")]
 fn a_batch_id_that_was_never_issued_cannot_be_forgotten() {
     let mut contract = installed();
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.forget_names(7, names(&["aaa"]));
 }
 
@@ -490,9 +537,9 @@ fn a_batch_id_that_was_never_issued_cannot_be_forgotten() {
 fn a_stranger_cannot_forget_names() {
     let mut contract = installed();
     let batch_id = drafted(&mut contract, &["aaa"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.discard_batch(batch_id);
-    as_account(stranger(), NOTHING);
+    as_account(stranger(), YOCTO);
     contract.forget_names(batch_id, names(&["aaa"]));
 }
 
@@ -501,7 +548,7 @@ fn forgetting_cannot_reach_a_name_a_live_batch_still_holds() {
     let mut contract = installed();
     let dead = drafted(&mut contract, &["aaa"]);
     let live = drafted(&mut contract, &["bbb"]);
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.discard_batch(dead);
     assert_eq!(contract.forget_names(dead, names(&["bbb"])), 0);
     assert!(
@@ -521,7 +568,7 @@ fn a_fully_opened_batch_can_be_discarded_so_its_slot_comes_back() {
         contract.open_names(batch_id, names(&[name.as_str()]));
         ids.push(batch_id);
     }
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     contract.discard_batch(ids[0]);
     let next = contract.create_batch(owner_key(), FUNDING);
     assert!(
@@ -567,6 +614,77 @@ fn accepting_moves_the_admin_and_clears_the_nomination() {
     let view = contract.opener_view();
     assert_eq!(view.admin, next_operator());
     assert!(view.pending_admin.is_none());
+}
+
+#[test]
+#[should_panic(expected = "the nominated admin is the operator, the roles would merge")]
+fn the_operator_cannot_be_moved_onto_a_standing_nomination() {
+    let mut contract = installed();
+    as_account(admin(), YOCTO);
+    contract.change_admin(stranger());
+    as_account(admin(), YOCTO);
+    contract.change_operator(stranger());
+}
+
+#[test]
+fn cancelling_frees_the_seat_the_nomination_was_blocking() {
+    let mut contract = installed();
+    as_account(admin(), YOCTO);
+    contract.change_admin(stranger());
+    as_account(admin(), YOCTO);
+    contract.cancel_nomination();
+    as_account(admin(), YOCTO);
+    contract.change_operator(stranger());
+    let view = contract.opener_view();
+    assert_eq!(
+        view.operator,
+        stranger(),
+        "cancelling cleared the field but left the account still refused"
+    );
+    assert_eq!(view.admin, admin());
+    assert!(view.pending_admin.is_none());
+}
+
+#[test]
+fn cancelling_clears_the_nomination_and_leaves_the_admin_alone() {
+    let mut contract = installed();
+    as_account(admin(), YOCTO);
+    contract.change_admin(stranger());
+    as_account(admin(), YOCTO);
+    contract.cancel_nomination();
+    let view = contract.opener_view();
+    assert!(view.pending_admin.is_none());
+    assert_eq!(view.admin, admin());
+}
+
+#[test]
+#[should_panic(expected = "no admin has been nominated")]
+fn a_cancelled_nominee_can_no_longer_accept() {
+    let mut contract = installed();
+    as_account(admin(), YOCTO);
+    contract.change_admin(stranger());
+    as_account(admin(), YOCTO);
+    contract.cancel_nomination();
+    as_account(stranger(), YOCTO);
+    contract.accept_admin();
+}
+
+#[test]
+#[should_panic(expected = "no admin has been nominated")]
+fn cancelling_without_a_nomination_is_refused() {
+    let mut contract = installed();
+    as_account(admin(), YOCTO);
+    contract.cancel_nomination();
+}
+
+#[test]
+#[should_panic(expected = "only the admin may call this")]
+fn the_nominee_cannot_cancel_their_own_nomination() {
+    let mut contract = installed();
+    as_account(admin(), YOCTO);
+    contract.change_admin(stranger());
+    as_account(stranger(), YOCTO);
+    contract.cancel_nomination();
 }
 
 #[test]
@@ -766,7 +884,7 @@ fn a_call_cannot_carry_more_names_than_the_documented_maximum() {
         .map(|index| format!("name{index:04}"))
         .collect();
     let batch_names: Vec<AccountId> = raw.iter().map(|name| name.parse().unwrap()).collect();
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let batch_id = contract.create_batch(owner_key(), FUNDING);
     contract.add_names(batch_id, batch_names);
 }
@@ -774,7 +892,7 @@ fn a_call_cannot_carry_more_names_than_the_documented_maximum() {
 #[test]
 fn a_batch_grows_past_any_ceiling_and_costs_one_lookup_to_check() {
     let mut contract = installed();
-    as_account(operator(), NOTHING);
+    as_account(operator(), YOCTO);
     let batch_id = contract.create_batch(owner_key(), FUNDING);
     let mut added = 0u32;
     while added < 1000 {

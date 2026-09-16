@@ -35,6 +35,7 @@ pub struct Batch {
 
 #[near]
 impl RegistrarOpener {
+    #[payable]
     pub fn create_batch(&mut self, owner_key: PublicKey, funding: NearToken) -> u32 {
         self.assert_operator();
         require!(funding >= MIN_FUNDING, error::FUNDING_TOO_LOW);
@@ -63,6 +64,7 @@ impl RegistrarOpener {
         batch_id
     }
 
+    #[payable]
     pub fn add_names(&mut self, batch_id: u32, names: Vec<AccountId>) -> Base58CryptoHash {
         self.assert_operator();
         require!(names.len() <= MAX_NAMES_PER_ADD, error::TOO_MANY_NAMES);
@@ -84,6 +86,7 @@ impl RegistrarOpener {
         digest
     }
 
+    #[payable]
     pub fn discard_batch(&mut self, batch_id: u32) {
         let revoking = self.assert_admin_or_operator() == self.admin;
         let batch = self.batch_mut(batch_id);
@@ -96,6 +99,7 @@ impl RegistrarOpener {
         );
     }
 
+    #[payable]
     pub fn forget_names(&mut self, batch_id: u32, names: Vec<AccountId>) -> u32 {
         self.assert_admin_or_operator();
         require!(!names.is_empty(), error::EMPTY_NAMES);
@@ -122,7 +126,7 @@ impl RegistrarOpener {
 
     #[payable]
     pub fn open_names(&mut self, batch_id: u32, names: Vec<AccountId>) -> u32 {
-        self.assert_operator();
+        self.assert_operator_account();
         require!(names.len() <= MAX_NAMES_PER_CALL, error::TOO_MANY_NAMES);
         assert_openable(&names);
         let needed = GAS_PER_NAME.as_gas().saturating_mul(names.len() as u64);
