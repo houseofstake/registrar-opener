@@ -3,10 +3,10 @@
 A contract for `registrar` that lets a security council approve a list of top level names in one
 vote, after which a named operator opens them in batches without going back for another vote.
 
-Governance is a Sputnik DAO. There are two roles. The admin is the DAO and does three things:
-approve a batch, change the operator, change the admin. The operator drafts batches and opens the
-names once a batch is approved. The council never has to look at a name twice and never has to
-vote per name.
+Governance is a Sputnik DAO. There are two roles. The admin is the DAO: it approves a batch,
+discards one, opens a single name on its own, changes either role and upgrades the contract. The
+operator drafts batches and opens the names once a batch is approved. The council never has to
+look at a name twice and never has to vote per name.
 
 ## Why it has to live on registrar
 
@@ -80,6 +80,23 @@ reach the method, because the protocol forbids those keys from attaching a depos
 A create that fails returns its slot to the batch in the callback, so a batch that half lands can
 be finished without another vote. The account create, the transfer and the key are one batched
 receipt, so either all three land or none do and there is no half opened account to reconcile.
+
+## Opening one name without a batch
+
+    create_account(name, owner_key)                  admin, payable
+
+The admin can open a single name directly, outside the batch and outside the digest. It is there
+for the one off, a name the council decides on in the same proposal that opens it, with no batch
+to draft first. Funding is the attached deposit and it runs the same name checks the batch runs,
+so it can no more open a short or an implicit name. The operator cannot reach it at all.
+
+Its callback panics when the create does not land, which is the opposite of what the batch path
+does, and deliberately. A batch swallows one failure so that nineteen good names still open, and
+hands the failed name back to the batch to be retried. A single create has no siblings to protect
+and arrives through a DAO proposal, so a callback that returned quietly would let the proposal
+record as executed with no account created. Because the panic takes the whole callback with it,
+the `failed` count in `opener_view` only ever counts batch failures; a single create that fails
+leaves the contract exactly as it was and reports itself as a failed transaction instead.
 
 ## Revoking
 

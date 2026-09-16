@@ -34,4 +34,5 @@ pub const GAS_TOO_LOW: &str = "attach more gas or send fewer names";
 pub const FUNDING_TOO_LOW: &str = "funding is below the account storage floor";
 pub const DEPOSIT_MISMATCH: &str = "attached deposit must be the funding times the name count";
 
+pub const OPEN_FAILED: &str = "the account was not created";
 pub const UPGRADE_FAILED: &str = "the deploy did not land";

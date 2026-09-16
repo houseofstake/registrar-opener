@@ -77,15 +77,25 @@ impl RegistrarOpener {
             "opening",
             serde_json::json!({"name": name, "batch_id": Option::<u32>::None}),
         );
-        Promise::new(name)
+        Promise::new(name.clone())
             .create_account()
             .transfer(funding)
             .add_full_access_key(owner_key)
             .then(
                 Self::ext(env::current_account_id())
                     .with_static_gas(GAS_FOR_CALLBACK)
-                    .on_name_opened(None, None),
+                    .on_account_created(name),
             )
+    }
+
+    #[private]
+    pub fn on_account_created(&mut self, name: AccountId) {
+        require!(is_promise_success(), error::OPEN_FAILED);
+        self.opened = self.opened.saturating_add(1);
+        emit(
+            "opened",
+            serde_json::json!({"batch_id": Option::<u32>::None, "name": name}),
+        );
     }
 
     #[payable]

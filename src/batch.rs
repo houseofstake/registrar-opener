@@ -153,7 +153,7 @@ impl RegistrarOpener {
                 .then(
                     Self::ext(here.clone())
                         .with_static_gas(GAS_FOR_CALLBACK)
-                        .on_name_opened(Some(batch_id), Some(name.clone())),
+                        .on_name_opened(batch_id, name.clone()),
                 )
                 .detach();
         }
@@ -161,7 +161,7 @@ impl RegistrarOpener {
     }
 
     #[private]
-    pub fn on_name_opened(&mut self, batch_id: Option<u32>, name: Option<AccountId>) -> bool {
+    pub fn on_name_opened(&mut self, batch_id: u32, name: AccountId) -> bool {
         if is_promise_success() {
             self.opened = self.opened.saturating_add(1);
             emit(
@@ -171,11 +171,9 @@ impl RegistrarOpener {
             return true;
         }
         self.failed = self.failed.saturating_add(1);
-        if let (Some(batch_id), Some(name)) = (batch_id, name.clone()) {
-            if let Some(batch) = self.batches.get_mut(&batch_id) {
-                if batch.names.insert(name) {
-                    batch.remaining = batch.remaining.saturating_add(1);
-                }
+        if let Some(batch) = self.batches.get_mut(&batch_id) {
+            if batch.names.insert(name.clone()) {
+                batch.remaining = batch.remaining.saturating_add(1);
             }
         }
         emit(

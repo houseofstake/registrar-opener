@@ -646,7 +646,7 @@ fn a_failed_open_puts_the_name_back_in_the_batch() {
     contract.open_names(batch_id, names(&["aaa"]));
     assert_eq!(contract.get_batch(batch_id).unwrap().remaining, 0);
     as_callback(PromiseResult::Failed);
-    let handled = contract.on_name_opened(Some(batch_id), Some("aaa".parse().unwrap()));
+    let handled = contract.on_name_opened(batch_id, "aaa".parse().unwrap());
     assert!(!handled);
     let batch = contract.get_batch(batch_id).unwrap();
     assert_eq!(batch.remaining, 1);
@@ -662,7 +662,7 @@ fn a_failure_after_the_operator_changed_still_returns_the_slot() {
     as_account(admin(), YOCTO);
     contract.change_operator(next_operator());
     as_callback(PromiseResult::Failed);
-    contract.on_name_opened(Some(batch_id), Some("aaa".parse().unwrap()));
+    contract.on_name_opened(batch_id, "aaa".parse().unwrap());
     assert_eq!(
         contract.get_batch(batch_id).unwrap().remaining,
         1,
@@ -677,7 +677,7 @@ fn a_successful_open_is_counted() {
     as_account(operator(), FUNDING);
     contract.open_names(batch_id, names(&["aaa"]));
     as_callback(PromiseResult::Successful(Vec::new()));
-    assert!(contract.on_name_opened(Some(batch_id), Some("aaa".parse().unwrap())));
+    assert!(contract.on_name_opened(batch_id, "aaa".parse().unwrap()));
     assert_eq!(contract.opener_view().opened, 1);
     assert_eq!(contract.get_batch(batch_id).unwrap().remaining, 0);
 }
@@ -700,6 +700,30 @@ fn the_single_create_path_refuses_dust() {
     contract
         .create_account("aaa".parse().unwrap(), owner_key())
         .detach();
+}
+
+#[test]
+fn a_single_create_that_lands_is_counted() {
+    let mut contract = installed();
+    as_account(admin(), FUNDING);
+    contract
+        .create_account("aaa".parse().unwrap(), owner_key())
+        .detach();
+    as_callback(PromiseResult::Successful(Vec::new()));
+    contract.on_account_created("aaa".parse().unwrap());
+    assert_eq!(contract.opener_view().opened, 1);
+}
+
+#[test]
+#[should_panic(expected = "the account was not created")]
+fn a_single_create_that_fails_takes_the_whole_call_down() {
+    let mut contract = installed();
+    as_account(admin(), FUNDING);
+    contract
+        .create_account("aaa".parse().unwrap(), owner_key())
+        .detach();
+    as_callback(PromiseResult::Failed);
+    contract.on_account_created("aaa".parse().unwrap());
 }
 
 #[test]

@@ -1301,7 +1301,6 @@ async fn a_registrar_key_cannot_forge_a_callback_into_an_approved_batch() -> Res
         .call("on_name_opened")
         .args_json(json!({
             "batch_id": batch_id,
-            "operator_epoch": 0,
             "name": "smuggled",
         }))
         .max_gas()
