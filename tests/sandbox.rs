@@ -11,6 +11,8 @@ const YOCTO: NearToken = NearToken::from_yoctonear(1);
 const DAO_ACCOUNT: &str = "hos-root.sputnik-dao.near";
 const COUNCIL_THRESHOLD: usize = 3;
 const DIGEST_DOMAIN: &[u8] = b"registrar-opener:batch:v1";
+const MULTISIG_STATE: &str = "registrar-mainnet-state.json";
+const INSTALLED_STATE: &str = "registrar-mainnet-state-v1.1.0.json";
 
 struct Fleet {
     worker: Worker<Sandbox>,
@@ -29,8 +31,8 @@ fn fixture(name: &str) -> Result<Vec<u8>> {
     std::fs::read(&path).with_context(|| format!("read {}", path.display()))
 }
 
-fn mainnet_state() -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let raw = fixture("registrar-mainnet-state.json")?;
+fn mainnet_state(name: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let raw = fixture(name)?;
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&raw)?;
     rows.iter()
         .map(|row| {
@@ -78,12 +80,17 @@ fn member_count(state: &[u8]) -> Result<u64> {
     Ok(u64::from_le_bytes(state[at..at + 8].try_into()?))
 }
 
-async fn patch_mainnet_registrar(worker: &Worker<Sandbox>, sk: &SecretKey) -> Result<Contract> {
+async fn patch_mainnet_registrar(
+    worker: &Worker<Sandbox>,
+    sk: &SecretKey,
+    code: &[u8],
+    state: &str,
+) -> Result<Contract> {
     let id: near_workspaces::AccountId = "registrar".parse()?;
-    let rows = mainnet_state()?;
+    let rows = mainnet_state(state)?;
     let mut patch = worker
         .patch(&id)
-        .code(&fixture("registrar-mainnet.wasm")?)
+        .code(code)
         .access_key(sk.public_key(), near_workspaces::AccessKey::full_access())
         .account(
             near_workspaces::AccountDetailsPatch::default().balance(NearToken::from_near(100_000)),
@@ -113,6 +120,19 @@ fn ours_wasm() -> Result<Vec<u8>> {
     std::fs::read(&path).with_context(|| {
         format!(
             "{} is missing, run cargo near build non-reproducible-wasm --locked --no-abi",
+            path.display()
+        )
+    })
+}
+
+fn wipe_wasm() -> Result<Vec<u8>> {
+    let path = build_dir()?
+        .join("near")
+        .join("registrar_opener_wipe")
+        .join("registrar_opener_wipe.wasm");
+    std::fs::read(&path).with_context(|| {
+        format!(
+            "{} is missing, run cargo near build reproducible-wasm --manifest-path wipe/Cargo.toml",
             path.display()
         )
     })
@@ -495,7 +515,7 @@ async fn the_multisig_installs_the_opener_from_mainnets_own_state_at_its_own_thr
         .map(|name| SecretKey::from_seed(KeyType::ED25519, name))
         .collect();
 
-    let rows = mainnet_state()?;
+    let rows = mainnet_state(MULTISIG_STATE)?;
     let state = rows
         .iter()
         .find(|(key, _)| key == b"STATE")
@@ -630,7 +650,13 @@ async fn the_multisig_installs_the_opener_from_mainnets_own_state_at_its_own_thr
 async fn mainnets_own_stored_state_reads_back_under_mainnets_own_code() -> Result<()> {
     let worker = near_workspaces::sandbox().await?;
     let sk = SecretKey::from_seed(KeyType::ED25519, "registrar-opener");
-    let registrar = patch_mainnet_registrar(&worker, &sk).await?;
+    let registrar = patch_mainnet_registrar(
+        &worker,
+        &sk,
+        &fixture("registrar-mainnet.wasm")?,
+        MULTISIG_STATE,
+    )
+    .await?;
 
     let members: Vec<serde_json::Value> = registrar.view("get_members").await?.json()?;
     let keys: Vec<&str> = members
@@ -659,7 +685,13 @@ async fn mainnets_own_stored_state_reads_back_under_mainnets_own_code() -> Resul
 async fn the_opener_installs_over_mainnets_own_stored_state() -> Result<()> {
     let worker = near_workspaces::sandbox().await?;
     let sk = SecretKey::from_seed(KeyType::ED25519, "registrar-opener");
-    let registrar = patch_mainnet_registrar(&worker, &sk).await?;
+    let registrar = patch_mainnet_registrar(
+        &worker,
+        &sk,
+        &fixture("registrar-mainnet.wasm")?,
+        MULTISIG_STATE,
+    )
+    .await?;
 
     let before = worker.view_state(registrar.id()).await?;
     assert_eq!(before.len(), 10, "mainnet carries ten rows");
@@ -1388,5 +1420,167 @@ async fn a_proxy_cannot_open_a_name_even_when_registrar_signs_the_call() -> Resu
         report.contains("CreateAccountOnlyByRegistrar"),
         "expected the protocol level refusal, got: {report}"
     );
+    Ok(())
+}
+
+fn redo_install(
+    registrar: &Contract,
+    admin: &str,
+    operator: &str,
+) -> Result<near_workspaces::operations::Transaction> {
+    Ok(registrar
+        .as_account()
+        .batch(registrar.id())
+        .deploy(&wipe_wasm()?)
+        .call(near_workspaces::operations::Function::new("wipe").gas(Gas::from_tgas(20)))
+        .deploy(&ours_wasm()?)
+        .call(
+            near_workspaces::operations::Function::new("new")
+                .args_json(json!({ "admin": admin, "operator": operator }))
+                .gas(Gas::from_tgas(50)),
+        ))
+}
+
+async fn installed_mainnet_registrar(worker: &Worker<Sandbox>) -> Result<Contract> {
+    let sk = SecretKey::from_seed(KeyType::ED25519, "registrar-opener");
+    let registrar = patch_mainnet_registrar(worker, &sk, &ours_wasm()?, INSTALLED_STATE).await?;
+    let view: serde_json::Value = registrar.view("opener_view").await?.json()?;
+    assert_eq!(
+        view["admin"], DAO_ACCOUNT,
+        "the fixture is not mainnet's install"
+    );
+    assert_eq!(
+        view["operator"], "root.near",
+        "the fixture is not mainnet's install"
+    );
+    Ok(registrar)
+}
+
+async fn code_hash(worker: &Worker<Sandbox>, account: &Contract) -> Result<String> {
+    match worker.view_account(account.id()).await?.contract_state {
+        near_workspaces::ContractState::LocalHash(hash) => Ok(hash.to_string()),
+        other => anyhow::bail!("{} holds no local contract: {other:?}", account.id()),
+    }
+}
+
+fn rows(state: &std::collections::HashMap<Vec<u8>, Vec<u8>>) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut rows: Vec<(Vec<u8>, Vec<u8>)> = state
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[tokio::test]
+async fn redoing_the_install_clears_mainnets_storage_and_names_a_new_operator() -> Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let registrar = installed_mainnet_registrar(&worker).await?;
+    assert_eq!(worker.view_state(registrar.id()).await?.len(), 10);
+
+    let council = council_accounts(&worker).await?;
+    let dao = deploy_dao(&worker).await?;
+    let operator = worker.dev_create_account().await?;
+    let stranger = worker.dev_create_account().await?;
+
+    let redo = redo_install(&registrar, DAO_ACCOUNT, operator.id().as_str())?
+        .transact()
+        .await?;
+    assert!(redo.is_success(), "the redo failed: {redo:#?}");
+
+    let state = worker.view_state(registrar.id()).await?;
+    assert_eq!(
+        state.keys().collect::<Vec<_>>(),
+        vec![&b"STATE".to_vec()],
+        "something other than the opener's own STATE is left on the account"
+    );
+    let code = ours_wasm()?;
+    assert_eq!(
+        code_hash(&worker, &registrar).await?,
+        bs58::encode(Sha256::digest(&code)).into_string(),
+        "the account does not end on the opener's code"
+    );
+    let view: serde_json::Value = registrar.view("opener_view").await?.json()?;
+    assert_eq!(view["admin"], DAO_ACCOUNT);
+    assert_eq!(view["operator"], operator.id().as_str());
+    assert_eq!(view["next_batch_id"], 0);
+    assert_eq!(view["live_batches"], 0);
+    assert!(view["pending_admin"].is_null());
+
+    let fleet = Fleet {
+        worker,
+        registrar,
+        dao,
+        council,
+        operator,
+        stranger,
+        owner_key: SecretKey::from_seed(KeyType::ED25519, "cohort-owner").public_key(),
+    };
+    let batch_id = draft(&fleet, &["alpha"]).await?;
+    approve(&fleet, batch_id).await?;
+    open(&fleet, batch_id, &["alpha"], Gas::from_tgas(300))
+        .await?
+        .into_result()?;
+    assert_opened(&fleet, "alpha").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_redo_that_fails_at_new_leaves_every_row_and_the_code_as_they_were() -> Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let registrar = installed_mainnet_registrar(&worker).await?;
+    let before = rows(&worker.view_state(registrar.id()).await?);
+    let code_before = code_hash(&worker, &registrar).await?;
+
+    let redo = redo_install(&registrar, DAO_ACCOUNT, DAO_ACCOUNT)?
+        .transact()
+        .await?;
+    assert!(
+        redo.is_failure(),
+        "new should refuse the admin as operator: {redo:#?}"
+    );
+    assert!(
+        format!("{redo:?}").contains("admin and operator must be different accounts"),
+        "the redo failed somewhere other than new: {redo:#?}"
+    );
+
+    assert_eq!(
+        rows(&worker.view_state(registrar.id()).await?),
+        before,
+        "the wipe survived a failed new"
+    );
+    assert_eq!(code_hash(&worker, &registrar).await?, code_before);
+    let view: serde_json::Value = registrar.view("opener_view").await?.json()?;
+    assert_eq!(view["operator"], "root.near");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_wipe_refuses_an_install_that_has_moved() -> Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let registrar = installed_mainnet_registrar(&worker).await?;
+    let mut state = worker
+        .view_state(registrar.id())
+        .await?
+        .remove(b"STATE".as_slice())
+        .context("the fixture has no STATE")?;
+    let last = state.len() - 1;
+    state[last] = 1;
+    worker.patch_state(registrar.id(), b"STATE", &state).await?;
+    let before = rows(&worker.view_state(registrar.id()).await?);
+
+    let operator = worker.dev_create_account().await?;
+    let redo = redo_install(&registrar, DAO_ACCOUNT, operator.id().as_str())?
+        .transact()
+        .await?;
+    assert!(
+        redo.is_failure(),
+        "the wipe cleared a state it was not built for"
+    );
+    assert!(
+        format!("{redo:?}").contains("state is not the untouched install this wipe was built for"),
+        "the redo failed somewhere other than the wipe: {redo:#?}"
+    );
+    assert_eq!(rows(&worker.view_state(registrar.id()).await?), before);
     Ok(())
 }

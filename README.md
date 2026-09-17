@@ -195,6 +195,36 @@ Worth being explicit, because it is not reversible through this path:
   are gone except through a FullAccess key.
 - `registrar` holds two FullAccess keys, so a bad deploy is recoverable by whoever holds them.
 
+## Redoing the install
+
+v1.1.0 went onto mainnet `registrar` with `root.near` as operator. Nothing was called after it, so
+the install is redone rather than amended, and the multisig's nine leftover rows go with it.
+`new` refuses to run over opener state, so a FullAccess key sends one transaction from
+`registrar` to `registrar`:
+
+    DeployContract(wipe) -> wipe() -> DeployContract(opener v1.1.0) -> new(admin, operator)
+
+`wipe/` is the throwaway contract. It checks the caller is `registrar`, checks `STATE` hashes to
+the exact install on mainnet, deletes it, then deletes the nine multisig rows and refuses if any of
+them is not there. All four actions are one receipt, so if the wipe refuses or `new` does, the
+account keeps its old code and every row. The wipe code is replaced inside the same receipt and
+is never callable on its own.
+
+`fixtures/registrar-mainnet-state-v1.1.0.json` is every row on `registrar` after the install,
+read from two providers with identical responses. The unit tests in `wipe/` prove the hash and the
+nine keys are those rows. The sandbox tests patch the rows under the v1.1.0 code and send the
+exact transaction:
+
+- `redoing_the_install_clears_mainnets_storage_and_names_a_new_operator` ends with `STATE` as the
+  only row, the v1.1.0 code hash, the new operator, and a batch drafted, approved and opened.
+- `a_redo_that_fails_at_new_leaves_every_row_and_the_code_as_they_were` makes `new` refuse and
+  checks all ten rows and the code are untouched.
+- `the_wipe_refuses_an_install_that_has_moved` changes one byte of `STATE` and checks the same.
+
+Build the wipe reproducibly with
+
+    cargo near build reproducible-wasm --manifest-path wipe/Cargo.toml
+
 ## Building and testing
 
 Toolchain is pinned in `rust-toolchain.toml`.
@@ -202,6 +232,7 @@ Toolchain is pinned in `rust-toolchain.toml`.
     cargo test --lib
     cargo near build non-reproducible-wasm --locked --no-abi
     cargo build -p registrar-opener-stub --target wasm32-unknown-unknown --release
+    cargo near build reproducible-wasm --manifest-path wipe/Cargo.toml
     cargo test --test sandbox
 
 The sandbox tests need both wasms, so build before running them. Nothing about the governance in

@@ -3828,6 +3828,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "registrar-opener-wipe"
+version = "0.1.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
