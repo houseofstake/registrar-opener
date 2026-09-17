@@ -225,17 +225,39 @@ Lint is two passes, because the sandbox dev dependencies cannot build for wasm:
 
 For the bytes that would actually be deployed, build them reproducibly:
 
-    cargo near build reproducible-wasm --no-abi
+    cargo near build reproducible-wasm
+
+It takes no flags. `--no-abi` is already part of `container_build_command` in `Cargo.toml`, and
+`reproducible-wasm` refuses it on the command line.
 
 That runs inside `sourcescan/cargo-near:0.22.0-rust-1.97.1` pinned by digest in `Cargo.toml`, and
 builds the git commit rather than the working tree, so it needs a clean worktree and the HEAD
 commit pushed. Two people running it at the same commit get the same sha256, which is what makes
 it possible for a council to vote on a hash rather than on trust. The hash for a given commit is
-recorded in that commit's annotated tag, not in a file, because cargo-near stamps the commit into
-the wasm and committing the hash would change it.
+recorded in that commit's annotated tag, because cargo-near stamps the commit into the wasm and
+committing the hash alongside the code would change it. The table under versions copies those
+hashes in a later commit, so a hash there describes its tag, never the commit that lists it.
 
 A plain `cargo build` produces a wasm the nearcore VM rejects. Use cargo-near for anything that
 will be deployed.
+
+## Versions
+
+Every row was rebuilt with `cargo near build reproducible-wasm` from a fresh checkout of its tag
+and matched the tag byte for byte. To check one, check out the tag and run the same command. The
+`bs58` column is what `view_account` reports as `code_hash` once that version is deployed.
+
+| Tag      | Commit    | Size (bytes) | sha256                                                             | bs58                                           |
+| -------- | --------- | ------------ | ------------------------------------------------------------------ | ---------------------------------------------- |
+| `v1.0.0` | `99b1b6b` | 200598       | `bf93cd04e631567d1f9587e31e2141efc33ffbd81f8f5adcecd118cf7e142f78` | `Dtqazdth5CYRJLJK9k3K7deTfcY61K9faoUQmFTiWVMh` |
+| `v1.1.0` | `cf0697a` | 202116       | `4f589c14f5daed28d5f9094b8ccff9209a23b42a819f5dfc04784f43bc5551c8` | `6LjaMFkmxabCcjnopbJueCJkT2q4oypsfhrMH1VkpGmm` |
+
+- `v1.0.0`: batches of any size, names held in a `LookupSet` and removed with `forget_names`.
+- `v1.1.0`: `create_account` gets its own callback that fails the call when the create does not
+  land. The admin and operator can no longer merge through a nomination, and `cancel_nomination`
+  withdraws one. Every operator method now takes one yoctoNEAR, `open_names` through its deposit.
+
+Neither version has been deployed to mainnet.
 
 ## Fixtures
 
